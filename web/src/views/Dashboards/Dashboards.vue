@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -17,7 +17,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <!-- eslint-disable vue/v-on-event-hyphenation -->
 <!-- eslint-disable vue/attribute-hyphenation -->
 <template>
-  <q-page class="q-pa-none" :key="store.state.selectedOrganization.identifier">
+  <q-page
+    class="q-pa-none dashboards-list-page"
+    :key="store.state.selectedOrganization.identifier"
+  >
     <!-- searchBar at top -->
     <div
       class="q-table__top"
@@ -30,18 +33,39 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     >
       <div class="q-table__title">{{ t("dashboard.header") }}</div>
 
-      <q-input
-        v-model="filterQuery"
-        filled
-        dense
-        class="q-ml-auto"
-        :placeholder="t('dashboard.search')"
-        data-test="dashboard-search"
-      >
-        <template #prepend>
-          <q-icon name="search" />
-        </template>
-      </q-input>
+      
+      <div class="flex q-ml-auto  tw-ps-2">
+      <!-- :class="store.state.theme === 'dark' ? 'bg-grey-9' : 'bg-grey-3'" -->
+        <q-input
+          v-model="dynamicQueryModel"   
+          dense
+          filled
+          borderless
+          :placeholder="searchAcrossFolders ? t('dashboard.searchAcross') : t('dashboard.search')"
+          data-test="dashboard-search"
+          :clearable="searchAcrossFolders"
+          @clear="clearSearchHistory"
+        >
+          <template #prepend>
+            <q-icon name="search" />
+          </template>
+        </q-input>
+        
+      </div>
+      <div>
+          <q-toggle
+            data-test="dashboard-search-across-folders-toggle"
+            v-model="searchAcrossFolders"
+            label="All Folders"
+            class="tw-mr-3"
+          >
+        </q-toggle>
+          <q-tooltip class="q-mt-lg" anchor="top middle" self="bottom middle">
+            {{ searchAcrossFolders
+              ? t("dashboard.searchSelf")
+              : t("dashboard.searchAll") }}
+          </q-tooltip>
+        </div>
       <q-btn
         class="q-ml-md text-bold"
         padding="sm lg"
@@ -66,7 +90,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       v-model="splitterModel"
       unit="px"
       :limits="[200, 500]"
-      style="height: calc(100vh - 122px)"
+      style="height: calc(100vh - 112px)"
       data-test="dashboard-splitter"
     >
       <template v-slot:before>
@@ -86,37 +110,58 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               :key="tab.folderId"
               :name="tab.folderId"
               content-class="tab_content full-width"
+              class="test-class"
               :data-test="`dashboard-folder-tab-${tab.folderId}`"
             >
-              <div class="full-width row justify-between no-wrap">
-                <span
-                  style="
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                  "
-                  :title="tab.name"
-                  >{{ tab.name }}</span
-                >
-                <div>
-                  <q-icon
+              <div class="folder-item full-width row justify-between no-wrap">
+                <span class="folder-name" :title="tab.name">{{
+                  tab.name
+                }}</span>
+                <div class="hover-actions">
+                  <q-btn
                     v-if="index"
-                    :name="outlinedEdit"
-                    class="q-ml-sm"
-                    @click.stop="editFolder(tab.folderId)"
-                    style="cursor: pointer; justify-self: end"
-                    data-test="dashboard-edit-folder-icon"
-                  />
-                  <q-icon
-                    v-if="index"
-                    :name="outlinedDelete"
-                    class="q-ml-sm"
-                    @click.stop="showDeleteFolderDialogFn(tab.folderId)"
-                    style="cursor: pointer; justify-self: end"
-                    data-test="dashboard-delete-folder-icon"
-                  />
+                    dense
+                    flat
+                    no-caps
+                    icon="more_vert"
+                    style="cursor: pointer; justify-self: end; height: 0.5rem"
+                    size="sm"
+                    data-test="dashboard-more-icon"
+                  >
+                    <q-menu>
+                      <q-list dense>
+                        <q-item
+                          v-close-popup
+                          clickable
+                          @click.stop="editFolder(tab.folderId)"
+                          data-test="dashboard-edit-folder-icon"
+                        >
+                          <q-item-section avatar>
+                            <q-icon :name="outlinedEdit" size="xs" />
+                          </q-item-section>
+                          <q-item-section>
+                            <q-item-label>Edit</q-item-label>
+                          </q-item-section>
+                        </q-item>
+                        <q-item
+                          v-close-popup
+                          clickable
+                          @click.stop="showDeleteFolderDialogFn(tab.folderId)"
+                          data-test="dashboard-delete-folder-icon"
+                        >
+                          <q-item-section avatar>
+                            <q-icon :name="outlinedDelete" size="xs" />
+                          </q-item-section>
+                          <q-item-section>
+                            <q-item-label>Delete</q-item-label>
+                          </q-item-section>
+                        </q-item>
+                      </q-list>
+                    </q-menu>
+                  </q-btn>
                 </div>
               </div>
+              <q-separator />
             </q-tab>
           </q-tabs>
           <div
@@ -177,7 +222,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 size="sm"
                 round
                 flat
-                @click.stop="showMoveDashboardPanel(props.row.id)"
+                @click.stop="showMoveDashboardPanel(props.row)"
                 data-test="dashboard-move-to-another-folder"
               ></q-btn>
               <q-btn
@@ -190,7 +235,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 size="sm"
                 round
                 flat
-                @click.stop="duplicateDashboard(props.row.id)"
+                @click.stop="duplicateDashboard(props.row.id, props.row.folder_id)"
                 data-test="dashboard-duplicate"
               ></q-btn>
               <q-btn
@@ -274,7 +319,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           <MoveDashboardToAnotherFolder
             @updated="handleDashboardMoved"
             :dashboard-id="selectedDashboardIdToMove"
-            :activeFolderId="activeFolderId"
+            :activeFolderId="activeFolderToMove"
           />
         </q-dialog>
 
@@ -308,12 +353,13 @@ import {
   computed,
   defineAsyncComponent,
   defineComponent,
+  onBeforeUnmount,
   onMounted,
   ref,
   watch,
 } from "vue";
 import { useStore } from "vuex";
-import { useQuasar, date } from "quasar";
+import { useQuasar, date, debounce } from "quasar";
 import { useI18n } from "vue-i18n";
 
 import dashboardService from "../../services/dashboards";
@@ -337,6 +383,10 @@ import {
   outlinedEdit,
 } from "@quasar/extras/material-icons-outlined";
 import AddFolder from "../../components/dashboards/AddFolder.vue";
+import useNotifications from "@/composables/useNotifications";
+import { filter, forIn } from "lodash-es";
+import { convertDashboardSchemaVersion } from "@/utils/dashboard/convertDashboardSchemaVersion";
+import { useLoading } from "@/composables/useLoading";
 
 const MoveDashboardToAnotherFolder = defineAsyncComponent(() => {
   return import("@/components/dashboards/MoveDashboardToAnotherFolder.vue");
@@ -374,59 +424,82 @@ export default defineComponent({
     const isFolderEditMode = ref(false);
     const selectedFolderDelete = ref(null);
     const selectedFolderToEdit = ref(null);
+    const searchQuery = ref("");
+    const filteredResults = ref([]);
     const confirmDeleteFolderDialog = ref<boolean>(false);
+    const selectedDashboardToMove = ref(null);
     const selectedDashboardIdToMove = ref(null);
     const showMoveDashboardDialog = ref(false);
+    const searchAcrossFolders = ref(false);
+    const filterQuery = ref("");
+    const { showPositiveNotification, showErrorNotification } =
+      useNotifications();
+      const columns = computed(() => {
+        // Define the default columns
+        const baseColumns = [
+          {
+            name: "#",
+            label: "#",
+            field: "#",
+            align: "left",
+          },
+          {
+            name: "name",
+            field: "name",
+            label: t("dashboard.name"),
+            align: "left",
+            sortable: true,
+          },
+          {
+            name: "identifier",
+            field: "identifier",
+            label: t("dashboard.identifier"),
+            align: "left",
+            sortable: true,
+          },
+          {
+            name: "description",
+            field: "description",
+            label: t("dashboard.description"),
+            align: "left",
+            sortable: true,
+          },
+          {
+            name: "owner",
+            field: "owner",
+            label: t("dashboard.owner"),
+            align: "left",
+            sortable: true,
+          },
+          {
+            name: "created",
+            field: "created",
+            label: t("dashboard.created"),
+            align: "left",
+            sortable: true,
+          },
+          {
+            name: "actions",
+            field: "actions",
+            label: t("dashboard.actions"),
+            align: "center",
+          },
+        ];
 
-    const columns = ref<QTableProps["columns"]>([
-      {
-        name: "#",
-        label: "#",
-        field: "#",
-        align: "left",
-      },
-      {
-        name: "name",
-        field: "name",
-        label: t("dashboard.name"),
-        align: "left",
-        sortable: true,
-      },
-      {
-        name: "identifier",
-        field: "identifier",
-        label: t("dashboard.identifier"),
-        align: "left",
-        sortable: true,
-      },
-      {
-        name: "description",
-        field: "description",
-        label: t("dashboard.description"),
-        align: "left",
-        sortable: true,
-      },
-      {
-        name: "owner",
-        field: "owner",
-        label: t("dashboard.owner"),
-        align: "left",
-        sortable: true,
-      },
-      {
-        name: "created",
-        field: "created",
-        label: t("dashboard.created"),
-        align: "left",
-        sortable: true,
-      },
-      {
-        name: "actions",
-        field: "actions",
-        label: t("dashboard.actions"),
-        align: "center",
-      },
-    ]);
+        // Conditionally add the "folder" column
+        if (searchAcrossFolders.value && searchQuery.value != "") {
+            baseColumns.splice(2, 0, {
+              name: "folder",
+              field: "folder",
+              label: t('dashboard.folder'),
+              align: "left",
+              sortable: true,
+            });
+          }
+
+        return baseColumns;
+  });
+
     const perPageOptions = [
       { label: "5", value: 5 },
       { label: "10", value: 10 },
@@ -453,7 +526,7 @@ export default defineComponent({
       if (
         route.query.folder &&
         store.state.organizationData.folders.find(
-          (it: any) => it.folderId === route.query.folder
+          (it: any) => it.folderId === route.query.folder,
         )
       ) {
         activeFolderId.value = route.query.folder;
@@ -469,18 +542,88 @@ export default defineComponent({
           spinner: true,
           message: "Please wait while loading dashboards...",
         });
-        await getAllDashboardsByFolderId(store, activeFolderId.value);
-        dismiss();
-        router.push({
-          path: "/dashboards",
-          query: {
-            org_identifier: store.state.selectedOrganization.identifier,
-            folder: activeFolderId.value,
-          },
-        });
+        try {
+          const response = await getAllDashboardsByFolderId(
+            store,
+            activeFolderId.value,
+          );
+
+          dashboardList.value = response || [];
+        } catch (error) {
+          console.error("Error loading dashboards:", error);
+          showErrorNotification(
+            error?.message ||
+              "Failed to load dashboards for the selected folder.",
+          );
+        } finally {
+          dismiss();
+          searchAcrossFolders.value = false;
+          router.push({
+            path: "/dashboards",
+            query: {
+              org_identifier: store.state.selectedOrganization.identifier,
+              folder: activeFolderId.value,
+            },
+          });
+        }
       },
-      { deep: true }
+      { deep: true },
     );
+
+    watch(searchQuery, async (newQuery) => {
+      await debouncedSearch(newQuery);
+      if(searchQuery.value == ""){
+        filteredResults.value = [];
+      }
+    });
+
+    watch(searchAcrossFolders, async (newVal) => {
+      if (newVal) {
+        // If searching across folders, use searchQuery 
+        if (filterQuery.value) { 
+          searchQuery.value = filterQuery.value; 
+          filterQuery.value = ''; 
+        }
+        if (searchQuery.value) { 
+          // const searchResults = await fetchSearchResults.execute(searchQuery.value); 
+          // filteredResults.value = toRaw(searchResults); 
+          try {
+            // Cancel any in-flight search
+            if (currentSearchAbortController) {
+              currentSearchAbortController.abort();
+            }
+            currentSearchAbortController = new AbortController();
+              const searchResults = await fetchSearchResults.execute(searchQuery.value); 
+              filteredResults.value = toRaw(searchResults); 
+          } catch (error) {
+            if (!error.name === 'AbortError') {
+              filteredResults.value = [];
+              // Handle error state
+            }
+          }
+        } else {
+          // If no search query, clear filtered results
+          filteredResults.value = []; 
+        }
+      } else {
+        // If searching within the current folder, use filterQuery
+        if (searchQuery.value) {
+          filterQuery.value = searchQuery.value; 
+          searchQuery.value = ''; 
+        }
+        if (filterQuery.value) { 
+          await getDashboards(); 
+        } else {
+          // If no search query, clear filtered results
+          filteredResults.value = []; 
+        }
+      }
+    });
+
+    // Cleanup debounced function 
+    onBeforeUnmount(() => { 
+      debouncedSearch.cancel(); 
+    });
 
     const changePagination = (val: { label: string; value: any }) => {
       selectedPerPage.value = val.value;
@@ -508,7 +651,7 @@ export default defineComponent({
       });
     };
 
-    const duplicateDashboard = async (dashboardId: any) => {
+    const duplicateDashboard = async (dashboardId: any , folderId = activeFolderId.value) => {
       const dismiss = $q.notify({
         spinner: true,
         message: "Please wait...",
@@ -520,7 +663,7 @@ export default defineComponent({
         const dashboard = await getDashboard(
           store,
           dashboardId,
-          activeFolderId.value ?? "default"
+          folderId ?? "default",
         );
 
         // Duplicate the dashboard
@@ -534,95 +677,117 @@ export default defineComponent({
         await dashboardService.create(
           store.state.selectedOrganization.identifier,
           data,
-          activeFolderId.value || "default"
+          folderId || "default",
         );
 
         await getDashboards();
 
-        $q.notify({
-          type: "positive",
-          message: `Dashboard Duplicated Successfully`,
-        });
+        showPositiveNotification("Dashboard Duplicated Successfully.");
       } catch (err) {
-        $q.notify({
-          type: "negative",
-          message: err?.message ?? "Dashboard duplication failed",
-        });
+        showErrorNotification(err?.message ?? "Dashboard duplication failed");
       }
 
       dismiss();
     };
 
     const routeToViewD = (row) => {
-      const selectedDashboard = store.state.organizationData.allDashboardList[
-        activeFolderId.value
-      ].find((dashboard) => dashboard.dashboardId === row.id);
-
-      const selectedTabId = selectedDashboard
-        ? selectedDashboard?.tabs[0]?.tabId
-        : null;
       return router.push({
         path: "/dashboards/view",
         query: {
           org_identifier: store.state.selectedOrganization.identifier,
           dashboard: row.id,
-          folder: activeFolderId.value || "default",
-          tab: selectedTabId,
+          folder: searchAcrossFolders.value
+            ? row.folder_id
+            : activeFolderId.value || "default",
+          // tab: selectedTabId,
         },
       });
     };
+    const dashboardList = ref([]);
     const getDashboards = async () => {
       const dismiss = $q.notify({
         spinner: true,
         message: "Please wait while loading dashboards...",
       });
-      await getAllDashboards(store, activeFolderId.value ?? "default");
-      dismiss();
+      try {
+        const response = await getAllDashboards(
+          store,
+          activeFolderId.value ?? "default",
+        );
+        dashboardList.value = response;
+      } catch (err) {
+        showErrorNotification(err?.message || "Failed to load dashboards.");
+      } finally {
+        dismiss();
+      }
     };
+
+    const mapDashboard = (
+      board: any,
+      index: number,
+      folderInfo?: { name: string; id: string },
+    ) => ({
+      "#": index < 9 ? `0${index + 1}` : index + 1,
+      id: folderInfo ? board.dashboard.dashboardId : board.dashboardId,
+      ...(folderInfo && {
+        folder: folderInfo.name,
+        folder_id: folderInfo.id,
+      }),
+      name: folderInfo ? board.dashboard.title : board.title,
+      identifier: folderInfo ? board.dashboard.dashboardId : board.dashboardId,
+      description: folderInfo ? board.dashboard.description : board.description,
+      owner: folderInfo ? board.dashboard.owner : board.owner,
+      created: date.formatDate(
+        folderInfo ? board.dashboard.created : board.created,
+        "YYYY-MM-DDTHH:mm:ssZ",
+      ),
+      actions: "true",
+    });
+
     const dashboards = computed(function () {
-      const dashboardList = toRaw(
-        store.state.organizationData?.allDashboardList[activeFolderId.value] ??
-          []
-      );
-      return dashboardList.map((board: any, index) => {
-        return {
-          "#": index < 9 ? `0${index + 1}` : index + 1,
-          id: board.dashboardId,
-          name: board.title,
-          identifier: board.dashboardId,
-          description: board.description,
-          owner: board.owner,
-          created: date.formatDate(board.created, "YYYY-MM-DDTHH:mm:ssZ"),
-          actions: "true",
-        };
-      });
+      if (!searchAcrossFolders.value || searchQuery.value == "") {
+        const dashboardList = toRaw(
+          store.state.organizationData?.allDashboardList[
+            activeFolderId.value
+          ] ?? [],
+        );
+        return dashboardList.map((board: any, index) =>
+          mapDashboard(board, index),
+        );
+      } else {
+        return filteredResults.value.map((board: any, index) =>
+          mapDashboard(board, index, {
+            name: board.folder_name,
+            id: board.folder_id,
+          }),
+        );
+      }
     });
 
     const resultTotal = computed(function () {
-      return (
-        store.state.organizationData?.allDashboardList[activeFolderId.value]
-          ?.length || 0
-      );
+      if(!searchAcrossFolders.value || searchQuery.value == ""){
+        return store.state.organizationData?.allDashboardList[
+          activeFolderId.value
+        ]?.length;
+      }
+      else{
+        return filteredResults.value.length;
+      }
+
     });
 
     const deleteDashboard = async () => {
-      if (selectedDelete.value) {
+      if (selectedDelete.value ) {
         try {
           //delete dashboard by id and folder id
           await deleteDashboardById(
             store,
             selectedDelete.value.id,
-            activeFolderId.value ?? "default"
+            selectedDelete.value.folder_id ? selectedDelete.value.folder_id : (activeFolderId.value ?? "default"),
           );
-          $q.notify({
-            type: "positive",
-            message: "Dashboard deleted successfully.",
-            timeout: 5000,
-          });
+          showPositiveNotification("Dashboard deleted successfully.");
         } catch (err) {
-          $q.notify({
-            type: "negative",
-            message: err?.message ?? "Dashboard deletion failed",
+          showErrorNotification(err?.message ?? "Dashboard deletion failed", {
             timeout: 2000,
           });
         }
@@ -651,8 +816,9 @@ export default defineComponent({
       confirmDeleteFolderDialog.value = true;
     };
 
-    const showMoveDashboardPanel = (dashboardId: any) => {
-      selectedDashboardIdToMove.value = dashboardId;
+    const showMoveDashboardPanel = (dashboard: any) => {
+      selectedDashboardIdToMove.value = dashboard.id;
+      selectedDashboardToMove.value = dashboard;
       showMoveDashboardDialog.value = true;
     };
 
@@ -670,25 +836,91 @@ export default defineComponent({
           if (activeFolderId.value === selectedFolderDelete.value)
             activeFolderId.value = "default";
 
-          $q.notify({
-            type: "positive",
-            message: `Folder deleted successfully`,
+          showPositiveNotification("Folder deleted successfully.", {
             timeout: 2000,
           });
         } catch (err) {
-          $q.notify({
-            type: "negative",
-            message:
-              err?.response?.data?.message ||
+          showErrorNotification(
+            err?.response?.data?.message ||
               err?.message ||
               "Folder deletion failed",
-            timeout: 2000,
-          });
+            {
+              timeout: 2000,
+            },
+          );
         } finally {
           confirmDeleteFolderDialog.value = false;
         }
       }
     };
+
+    const dynamicQueryModel = computed({
+      get() {
+        return searchAcrossFolders.value ? searchQuery.value : filterQuery.value;
+      },
+      set(value) {
+        if (searchAcrossFolders.value) {
+          searchQuery.value = value;
+        } else {
+          filterQuery.value = value;
+        }
+      },
+    });
+
+    const fetchSearchResults = useLoading(async (query) => {
+      //this is used for showing search msg when user tries to toggle every time before searching across folders
+      try {
+        //here we are directly calling the dashboard service to get the search results
+        const response = await dashboardService.list(
+          0,
+          1000,
+          "name",
+          false,
+          "",
+          store.state.selectedOrganization.identifier,
+          "",
+          query,
+        )
+        if(response.config.params.title != searchQuery.value){
+            return [];
+        }
+
+        const migratedDashboards = response.data.dashboards.map((dashboard: any) => ({
+          dashboard: convertDashboardSchemaVersion (
+            dashboard["v" + dashboard.version]
+              ),
+          hash: dashboard.hash.toString(),
+          folder_id: dashboard.folder_id,
+          folder_name: dashboard.folder_name,
+            })
+          );
+         
+          return migratedDashboards;
+      } catch (error) {
+        showErrorNotification(error?.message ?? "Error fetching search results");
+      }
+    });
+    //this debounce search only makes the search call after 600ms of user input
+
+    const debouncedSearch = debounce (async (query) => {
+      if(!query) return;
+        const dismiss = $q.notify({
+          spinner: true,
+          message: "Please wait while searching for dashboards...",
+        });
+        const results = await fetchSearchResults.execute(query);
+        dismiss();
+        filteredResults.value = toRaw(results);
+    }, 600);
+
+    const activeFolderToMove = computed(()=>{
+      return selectedDashboardToMove.value.folder_id ? selectedDashboardToMove.value.folder_id : activeFolderId.value;
+    })
+    const clearSearchHistory = () => {
+      searchQuery.value = "";
+      filteredResults.value = [];
+    }
+
 
     return {
       t,
@@ -716,7 +948,7 @@ export default defineComponent({
       routeToViewD,
       showDeleteDialogFn,
       confirmDeleteDialog,
-      filterQuery: ref(""),
+      filterQuery,
       filterData(rows: string | any[], terms: string) {
         const filtered = [];
         terms = terms.toLowerCase();
@@ -744,9 +976,18 @@ export default defineComponent({
       confirmDeleteFolderDialog,
       showMoveDashboardPanel,
       selectedFolderToEdit,
+      selectedDashboardToMove,
       selectedDashboardIdToMove,
       showMoveDashboardDialog,
       handleDashboardMoved,
+      searchAcrossFolders,
+      searchQuery,
+      fetchSearchResults,
+      debouncedSearch,
+      filteredResults,
+      activeFolderToMove,
+      clearSearchHistory,
+      dynamicQueryModel,
     };
   },
   methods: {
@@ -770,26 +1011,57 @@ export default defineComponent({
       this.routeToViewD(row);
     },
   },
+
 });
 </script>
 
 <style lang="scss" scoped>
-.q-table {
-  &__top {
-    border-bottom: 1px solid $border-color;
-    justify-content: flex-end;
-  }
-}
-
 .dashboards-tabs {
+  .test-class {
+    min-height: 1.5rem;
+    margin-bottom: 6px;
+    border-bottom: 1px lightgray dotted;
+  }
+  .folder-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: relative;
+    border-radius: 0.25rem;
+    transition: background-color 0.3s;
+
+    &:hover {
+      .hover-actions {
+        display: flex;
+      }
+    }
+
+    // .folder-name {
+    //   white-space: nowrap;
+    //   overflow: hidden;
+    //   text-overflow: ellipsis;
+    // }
+
+    .hover-actions {
+      display: none;
+      align-items: center;
+
+      .q-btn {
+        margin-left: 0.5rem;
+      }
+    }
+  }
+
   .q-tabs {
     &--vertical {
       margin: 5px;
+
       .q-tab {
         justify-content: flex-start;
         padding: 0 1rem 0 1.25rem;
         border-radius: 0.5rem;
         text-transform: capitalize;
+
         &__content.tab_content {
           .q-tab {
             &__icon + &__label {
@@ -798,12 +1070,25 @@ export default defineComponent({
             }
           }
         }
+
         &--active {
-          background-color: $accent;
-          color: black;
+          background-color: $primary;
+          color: white;
         }
       }
     }
   }
+}
+
+.dashboards-list-page {
+  :deep(.q-table th),
+  :deep(.q-table td) {
+    padding: 0px 16px;
+    height: 32px;
+  }
+}
+
+.folder-name {
+  text-transform: none !important;
 }
 </style>

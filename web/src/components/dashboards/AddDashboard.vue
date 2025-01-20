@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -59,7 +59,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           outlined
           filled
           dense
-          :rules="[(val) => !!val.trim() || t('dashboard.nameRequired')]"
+          :rules="[(val: any) => !!val.trim() || t('dashboard.nameRequired')]"
           :lazy-rules="true"
         />
         <span>&nbsp;</span>
@@ -78,7 +78,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
         <span>&nbsp;</span>
         <!-- select folder or create new folder and select -->
-        <select-folder-dropdown @folder-selected="selectedFolder = $event" />
+        <select-folder-dropdown
+          v-if="showFolderSelection"
+          :active-folder-id="selectedFolder.value"
+          @folder-selected="selectedFolder = $event"
+        />
 
         <div class="flex justify-center q-mt-lg">
           <q-btn
@@ -112,13 +116,14 @@ import { defineComponent, ref } from "vue";
 import dashboardService from "../../services/dashboards";
 import { useI18n } from "vue-i18n";
 import { useStore } from "vuex";
-import { isProxy, toRaw } from "vue";
+import { toRaw } from "vue";
 import { getImageURL } from "../../utils/zincutils";
 import { convertDashboardSchemaVersion } from "@/utils/dashboard/convertDashboardSchemaVersion";
 import SelectFolderDropdown from "./SelectFolderDropdown.vue";
 import { getAllDashboards } from "@/utils/commons";
 import { useQuasar } from "quasar";
 import { useLoading } from "@/composables/useLoading";
+import useNotifications from "@/composables/useNotifications";
 
 const defaultValue = () => {
   return {
@@ -134,8 +139,14 @@ export default defineComponent({
   name: "ComponentAddDashboard",
   props: {
     activeFolderId: {
-      type: String,
+      validator: (value: any) => {
+        return typeof value === "string" || value === null;
+      },
       default: "default",
+    },
+    showFolderSelection: {
+      type: Boolean,
+      default: true,
     },
   },
   emits: ["updated"],
@@ -148,6 +159,9 @@ export default defineComponent({
     const isValidIdentifier: any = ref(true);
     const { t } = useI18n();
     const $q = useQuasar();
+    const { showPositiveNotification, showErrorNotification } =
+      useNotifications();
+
     const activeFolder: any = store.state.organizationData.folders.find(
       (item: any) => item.folderId === props.activeFolderId
     );
@@ -225,15 +239,10 @@ export default defineComponent({
             description: "",
           };
           await addDashboardForm.value.resetValidation();
-          $q.notify({
-            type: "positive",
-            message: `Dashboard added successfully.`,
-          });
+
+          showPositiveNotification("Dashboard added successfully.");
         } catch (err: any) {
-          $q.notify({
-            type: "negative",
-            message: err?.message ?? "Dashboard creation failed.",
-          });
+          showErrorNotification(err?.message ?? "Dashboard creation failed.");
         }
       });
     });

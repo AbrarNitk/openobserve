@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,10 +16,7 @@
 use std::collections::HashMap;
 
 use config::{
-    cluster::{is_single_node, load_local_node_role},
-    get_config, get_instance_id,
-    utils::json,
-    SIZE_IN_MB, TELEMETRY_CLIENT,
+    cluster::LOCAL_NODE, get_config, get_instance_id, utils::json, SIZE_IN_MB, TELEMETRY_CLIENT,
 };
 use hashbrown::HashSet;
 use infra::{cache::stats, db as infra_db, schema::STREAM_SCHEMAS_LATEST};
@@ -162,15 +159,14 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
         }
     }
 
-    let roles = load_local_node_role();
-    if !is_single_node(&roles) {
+    if !LOCAL_NODE.is_single_node() {
         match get_cached_online_nodes().await {
             Some(nodes) => {
                 data.insert("is_HA_mode".to_string(), json::Value::Bool(true));
                 data.insert("number_of_nodes".to_string(), nodes.len().into());
                 data.insert(
                     "querier_nodes".to_string(),
-                    crate::common::infra::cluster::get_cached_online_querier_nodes()
+                    crate::common::infra::cluster::get_cached_online_querier_nodes(None)
                         .await
                         .unwrap_or_default()
                         .len()
@@ -255,12 +251,6 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
         format!("{:.0}", (traces_compressed_size / SIZE_IN_MB)).into(),
     );
 
-    let iter = STREAM_FUNCTIONS.iter().clone();
-    let mut ingest_functions = 0;
-    for item in iter {
-        ingest_functions += item.value().list.len()
-    }
-    data.insert("num_ingest_functions".to_string(), ingest_functions.into());
     data.insert(
         "num_query_functions".to_string(),
         QUERY_FUNCTIONS.len().into(),

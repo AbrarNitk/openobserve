@@ -1,5 +1,5 @@
 .q-w-sm {
-  width: 260px;
+  width: 360px;
 }
 .q-w-md {
   width: 400px;
@@ -113,4 +113,9 @@
     padding-bottom: 5px;
     max-width: 96%;
   }
+}
+
+.monaco-editor {
+  outline-width: 0px;
+  outline-style: none;
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,20 +15,13 @@
 
 use std::sync::Arc;
 
-use config::{
-    cluster::{is_flatten_compactor, LOCAL_NODE_ROLE},
-    get_config,
-    meta::stream::FileKey,
-};
-use tokio::{
-    sync::{mpsc, Mutex},
-    time,
-};
+use config::{cluster::LOCAL_NODE, get_config, meta::stream::FileKey};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::service::compact;
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    if !is_flatten_compactor(&LOCAL_NODE_ROLE) {
+    if !LOCAL_NODE.is_flatten_compactor() {
         return Ok(());
     }
 
@@ -37,7 +30,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    let (tx, rx) = mpsc::channel::<FileKey>(cfg.limit.file_merge_thread_num);
+    let (tx, rx) = mpsc::channel::<FileKey>(cfg.limit.file_merge_thread_num * 2);
     let rx = Arc::new(Mutex::new(rx));
     // start merge workers
     for _ in 0..cfg.limit.file_merge_thread_num {
@@ -72,7 +65,10 @@ pub async fn run() -> Result<(), anyhow::Error> {
 /// Generate flatten data file for parquet files
 async fn run_generate(tx: mpsc::Sender<FileKey>) -> Result<(), anyhow::Error> {
     loop {
-        time::sleep(time::Duration::from_secs(get_config().compact.interval)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            get_config().compact.interval,
+        ))
+        .await;
         log::debug!("[COMPACTOR] Running parquet file data flatten");
         let ret = compact::flatten::run_generate(tx.clone()).await;
         if ret.is_err() {

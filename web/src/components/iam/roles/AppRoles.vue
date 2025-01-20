@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -232,12 +232,14 @@ const deleteUserRole = (role: any) => {
       });
       setupRoles();
     })
-    .catch(() => {
-      q.notify({
-        message: "Error while deleting role!",
-        color: "negative",
-        position: "bottom",
-      });
+    .catch((error: any) => {
+      if (error.response.status != 403) {
+        q.notify({
+          message: "Error while deleting role!",
+          color: "negative",
+          position: "bottom",
+        });
+      }
     });
 };
 

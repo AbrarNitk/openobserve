@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -17,19 +17,26 @@ use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
 use bytes::Bytes;
-use config::{get_config, is_local_disk_storage, meta::stream::StreamType, utils::json};
+use config::{
+    cluster::LOCAL_NODE_ID,
+    get_config,
+    ider::SnowflakeIdGenerator,
+    is_local_disk_storage,
+    meta::{cluster::RoleGroup, stream::StreamType},
+    utils::json,
+};
 use hashbrown::{HashMap, HashSet};
 use infra::{
     cache,
     schema::{
-        unwrap_stream_settings, SchemaCache, STREAM_SCHEMAS, STREAM_SCHEMAS_COMPRESSED,
-        STREAM_SCHEMAS_LATEST, STREAM_SETTINGS,
+        unwrap_stream_settings, SchemaCache, STREAM_RECORD_ID_GENERATOR, STREAM_SCHEMAS,
+        STREAM_SCHEMAS_COMPRESSED, STREAM_SCHEMAS_LATEST, STREAM_SETTINGS,
     },
 };
 #[cfg(feature = "enterprise")]
 use {
     infra::{errors::Error, schema::mk_key},
-    o2_enterprise::enterprise::common::infra::config::O2_CONFIG,
+    o2_enterprise::enterprise::common::infra::config::get_config as get_o2_config,
 };
 
 use crate::{
@@ -51,7 +58,7 @@ pub async fn merge(
 
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         let key = mk_key(org_id, stream_type, stream_name);
         o2_enterprise::enterprise::super_cluster::queue::schema_merge(
             &key,
@@ -76,7 +83,7 @@ pub async fn update_setting(
 
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         let key = mk_key(org_id, stream_type, stream_name);
         o2_enterprise::enterprise::super_cluster::queue::schema_setting(
             &key,
@@ -101,7 +108,7 @@ pub async fn delete_fields(
 
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         let key = mk_key(org_id, stream_type, stream_name);
         o2_enterprise::enterprise::super_cluster::queue::schema_delete_fields(
             &key,
@@ -126,7 +133,7 @@ pub async fn delete(
 
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         let key = mk_key(org_id, stream_type, stream_name);
         o2_enterprise::enterprise::super_cluster::queue::delete(
             &key,
@@ -170,7 +177,7 @@ async fn list_stream_schemas(
                     stream_name,
                     stream_type,
                     schema: if fetch_schema {
-                        val.schema().clone()
+                        val.schema().as_ref().clone()
                     } else {
                         Schema::empty()
                     },
@@ -266,11 +273,11 @@ pub async fn watch() -> Result<(), anyhow::Error> {
         };
         match ev {
             db::Event::Put(ev) => {
-                let key_cloumns = ev.key.split('/').collect::<Vec<&str>>();
-                let (ev_key, ev_start_dt) = if key_cloumns.len() > 5 {
+                let key_columns = ev.key.split('/').collect::<Vec<&str>>();
+                let (ev_key, ev_start_dt) = if key_columns.len() > 5 {
                     (
-                        key_cloumns[..5].join("/"),
-                        key_cloumns[5].parse::<i64>().unwrap_or(0),
+                        key_columns[..5].join("/"),
+                        key_columns[5].parse::<i64>().unwrap_or(0),
                     )
                 } else {
                     (ev.key.to_string(), ev.start_dt.unwrap_or_default())
@@ -322,6 +329,13 @@ pub async fn watch() -> Result<(), anyhow::Error> {
                 }
                 let latest_schema = latest_schema.pop().unwrap();
                 let settings = unwrap_stream_settings(&latest_schema).unwrap_or_default();
+                if settings.store_original_data {
+                    if let dashmap::Entry::Vacant(entry) =
+                        STREAM_RECORD_ID_GENERATOR.entry(item_key.to_string())
+                    {
+                        entry.insert(SnowflakeIdGenerator::new(unsafe { LOCAL_NODE_ID }));
+                    }
+                }
                 let mut w = STREAM_SETTINGS.write().await;
                 w.insert(item_key.to_string(), settings);
                 drop(w);
@@ -385,14 +399,15 @@ pub async fn watch() -> Result<(), anyhow::Error> {
                 let stream_name = keys[2];
 
                 if stream_type.eq(&StreamType::EnrichmentTables) {
+                    let data = super::enrichment_table::get(org_id, stream_name)
+                        .await
+                        .unwrap();
                     ENRICHMENT_TABLES.insert(
                         item_key.to_owned(),
                         StreamTable {
                             org_id: org_id.to_string(),
                             stream_name: stream_name.to_string(),
-                            data: super::enrichment_table::get(org_id, stream_name)
-                                .await
-                                .unwrap(),
+                            data,
                         },
                     );
                 }
@@ -423,6 +438,10 @@ pub async fn watch() -> Result<(), anyhow::Error> {
                 w.remove(item_key);
                 w.shrink_to_fit();
                 drop(w);
+                {
+                    STREAM_RECORD_ID_GENERATOR.remove(item_key);
+                    STREAM_RECORD_ID_GENERATOR.shrink_to_fit();
+                }
                 let mut w = STREAM_SETTINGS.write().await;
                 w.remove(item_key);
                 w.shrink_to_fit();
@@ -484,6 +503,13 @@ pub async fn cache() -> Result<(), anyhow::Error> {
         }
         let latest_schema = latest_schema.last().unwrap();
         let settings = unwrap_stream_settings(latest_schema).unwrap_or_default();
+        if settings.store_original_data {
+            if let dashmap::Entry::Vacant(entry) =
+                STREAM_RECORD_ID_GENERATOR.entry(item_key.to_string())
+            {
+                entry.insert(SnowflakeIdGenerator::new(unsafe { LOCAL_NODE_ID }));
+            }
+        }
         let mut w = STREAM_SETTINGS.write().await;
         w.insert(item_key.to_string(), settings);
         drop(w);
@@ -558,7 +584,9 @@ pub async fn cache_enrichment_tables() -> Result<(), anyhow::Error> {
     // waiting for querier to be ready
     let expect_querier_num = get_config().limit.starting_expect_querier_num;
     loop {
-        let nodes = get_cached_online_querier_nodes().await.unwrap_or_default();
+        let nodes = get_cached_online_querier_nodes(Some(RoleGroup::Interactive))
+            .await
+            .unwrap_or_default();
         if nodes.len() >= expect_querier_num {
             break;
         }
@@ -583,6 +611,7 @@ pub async fn cache_enrichment_tables() -> Result<(), anyhow::Error> {
 }
 
 pub fn filter_schema_version_id(schemas: &[Schema], _start_dt: i64, end_dt: i64) -> Option<usize> {
+    let versions = schemas.len();
     for (i, schema) in schemas.iter().enumerate() {
         let metadata = schema.metadata();
         let schema_end_dt: i64 = metadata
@@ -590,11 +619,15 @@ pub fn filter_schema_version_id(schemas: &[Schema], _start_dt: i64, end_dt: i64)
             .unwrap_or(&"0".to_string())
             .parse()
             .unwrap();
-        if schema_end_dt == 0 || end_dt < schema_end_dt {
+        if end_dt < schema_end_dt {
             return Some(i);
         }
     }
-    None
+    if versions > 0 {
+        Some(versions - 1)
+    } else {
+        None
+    }
 }
 
 pub async fn list_organizations_from_cache() -> Vec<String> {

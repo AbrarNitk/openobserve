@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -100,6 +100,13 @@ impl HttpResponse {
     pub fn forbidden(error: impl ToString) -> ActixHttpResponse {
         ActixHttpResponse::Forbidden()
             .json(Self::error(StatusCode::FORBIDDEN.into(), error.to_string()))
+    }
+
+    /// Send a Forbidden response in json format and associate the
+    /// provided error as `error` field.
+    pub fn conflict(error: impl ToString) -> ActixHttpResponse {
+        ActixHttpResponse::Conflict()
+            .json(Self::error(StatusCode::CONFLICT.into(), error.to_string()))
     }
 
     /// Send a NotFound response in json format and associate the

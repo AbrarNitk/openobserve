@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -74,7 +74,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   dense
                   v-bind:readonly="beingUpdated"
                   v-bind:disable="beingUpdated"
-                  :rules="[(val: any) => !!val.trim() || 'Field is required!']"
+                  :rules="[
+                    (val: any) =>
+                      !!val
+                        ? isValidResourceName(val) ||
+                          `Characters like :, ?, /, #, and spaces are not allowed.`
+                        : t('common.nameRequired'),
+                  ]"
                   tabindex="0"
                   style="min-width: 480px"
                 />
@@ -182,6 +188,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 :columns="filteredColumns"
                 :conditions="formData.query_condition.conditions"
                 :alertData="formData"
+                :sqlQueryErrorMsg="sqlQueryErrorMsg"
+                :vrlFunctionError="vrlFunctionError"
+                :showTimezoneWarning="showTimezoneWarning"
                 v-model:trigger="formData.trigger_condition"
                 v-model:sql="formData.query_condition.sql"
                 v-model:promql="formData.query_condition.promql"
@@ -190,10 +199,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 v-model:promql_condition="
                   formData.query_condition.promql_condition
                 "
+                v-model:multi_time_range="
+                  formData.query_condition.multi_time_range
+                "
+                v-model:vrl_function="formData.query_condition.vrl_function"
                 v-model:isAggregationEnabled="isAggregationEnabled"
+                v-model:showVrlFunction="showVrlFunction"
                 @field:add="addField"
                 @field:remove="removeField"
                 @input:update="onInputUpdate"
+                @validate-sql="validateSqlQuery"
+                @update:showVrlFunction="updateFunctionVisibility"
+                @update:multi_time_range="updateMultiTimeRange"
                 class="q-mt-sm"
               />
             </div>
@@ -281,7 +298,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               </div>
             </div>
 
-            <div class="o2-input flex justify-start items-center">
+            <div class="o2-input flex justify-start items-start q-mt-sm">
               <div
                 data-test="add-alert-destination-title"
                 class="text-bold q-pb-sm"
@@ -294,7 +311,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   v-model="formData.destinations"
                   :options="getFormattedDestinations"
                   color="input-border"
-                  bg-color="input-bg q-mt-sm"
+                  bg-color="input-bg "
                   class="no-case"
                   stack-label
                   outlined
@@ -304,13 +321,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   use-input
                   fill-input
                   :rules="[(val: any) => !!val || 'Field is required!']"
-                  style="width: 250px"
+                  style="width: 200px"
                 >
                   <template v-slot:option="option">
                     <q-list dense>
                       <q-item
                         tag="label"
-                        :data-test="`add-alert-detination-${option.opt}-select-item`"
+                        :data-test="`add-alert-destination-${option.opt}-select-item`"
                       >
                         <q-item-section avatar>
                           <q-checkbox
@@ -329,6 +346,29 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     </q-list>
                   </template>
                 </q-select>
+              </div>
+              <div class="q-pl-sm">
+                <q-btn
+                data-test="create-destination-btn"
+                icon="refresh"
+                title="Refresh latest Destinations"
+                class="text-bold no-border"
+                no-caps
+                flat
+                dense
+                @click="$emit('refresh:destinations')"
+              />
+              </div>
+              <div class="q-pl-sm">
+                <q-btn
+                data-test="create-destination-btn"
+                label="Create Destination"
+                class="text-bold no-border"
+                color="secondary"
+                no-caps
+                @click="routeToCreateDestination"
+
+              />
               </div>
             </div>
 
@@ -438,13 +478,23 @@ import alertsService from "../../services/alerts";
 import { useI18n } from "vue-i18n";
 import { useStore } from "vuex";
 import { useQuasar, debounce } from "quasar";
-import streamService from "../../services/stream";
 import segment from "../../services/segment_analytics";
-import { getUUID } from "@/utils/zincutils";
+import {
+  getUUID,
+  getTimezoneOffset,
+  b64EncodeUnicode,
+  b64DecodeUnicode,
+  isValidResourceName,
+  getTimezonesByOffset,
+} from "@/utils/zincutils";
 import { cloneDeep } from "lodash-es";
 import { useRouter } from "vue-router";
 import useStreams from "@/composables/useStreams";
 import { outlinedInfo } from "@quasar/extras/material-icons-outlined";
+import useFunctions from "@/composables/useFunctions";
+import useQuery from "@/composables/useQuery";
+import searchService from "@/services/search";
+import { convertDateToTimestamp } from "@/utils/date";
 
 const defaultValue: any = () => {
   return {
@@ -475,13 +525,18 @@ const defaultValue: any = () => {
         },
       },
       promql_condition: null,
+      vrl_function: null,
+      multi_time_range: [],
     },
     trigger_condition: {
       period: 10,
       operator: ">=",
       frequency: 1,
+      cron: "",
       threshold: 3,
       silence: 10,
+      frequency_type: "minutes",
+      timezone: "UTC",
     },
     destinations: [],
     context_attributes: {},
@@ -511,7 +566,7 @@ export default defineComponent({
       default: () => [],
     },
   },
-  emits: ["update:list", "cancel:hideform"],
+  emits: ["update:list", "cancel:hideform", "refresh:destinations"],
   components: {
     ScheduledAlert: defineAsyncComponent(() => import("./ScheduledAlert.vue")),
     RealTimeAlert: defineAsyncComponent(() => import("./RealTimeAlert.vue")),
@@ -551,15 +606,23 @@ export default defineComponent({
       "Contains",
       "NotContains",
     ]);
+    const showVrlFunction = ref(false);
     const isFetchingStreams = ref(false);
     const streamTypes = ["logs", "metrics", "traces"];
     const editorUpdate = (e: any) => {
       formData.value.sql = e.target.value;
     };
+    const { getAllFunctions } = useFunctions();
 
     const { getStreams, getStream } = useStreams();
 
+    const { buildQueryPayload } = useQuery();
+
     const previewQuery = ref("");
+
+    const sqlQueryErrorMsg = ref("");
+
+    const validateSqlQueryPromise = ref<Promise<unknown>>();
 
     const addAlertFormRef = ref(null);
 
@@ -572,8 +635,13 @@ export default defineComponent({
 
     let parser: any = null;
 
+    const vrlFunctionError = ref("");
+
+    const showTimezoneWarning = ref(false);
+
     onBeforeMount(async () => {
       await importSqlParser();
+      await getAllFunctions();
     });
 
     const importSqlParser = async () => {
@@ -594,7 +662,7 @@ export default defineComponent({
       return formData.value.stream_type && formData.value.stream_name;
     });
 
-    const updateCondtions = (e: any) => {
+    const updateConditions = (e: any) => {
       try {
         const ast = parser.astify(e.target.value);
         if (ast) sqlAST.value = ast;
@@ -647,7 +715,7 @@ export default defineComponent({
       const selected_stream: any = await getStream(
         stream_name,
         formData.value.stream_type,
-        true
+        true,
       );
       selected_stream.schema.forEach(function (item: any) {
         triggerCols.value.push(item.name);
@@ -659,7 +727,7 @@ export default defineComponent({
       const streams: any = await getStream(
         stream_name,
         formData.value.stream_type,
-        true
+        true,
       );
 
       if (streams && Array.isArray(streams.schema)) {
@@ -675,13 +743,22 @@ export default defineComponent({
 
       onInputUpdate("stream_name", stream_name);
     };
+    watch(
+      () => props.destinations.length, // Watch for length changes
+      (newLength, oldLength) => {
+        formData.value.destinations  = formData.value.destinations.filter((destination : any) => {
+          return props.destinations.some((dest:any) => {
+            return dest.name === destination});
+        });
+      }
+    );
 
     watch(
       triggerCols.value,
       () => {
         filteredColumns.value = [...triggerCols.value];
       },
-      { immediate: true }
+      { immediate: true },
     );
     const filterColumns = (options: any[], val: String, update: Function) => {
       let filteredOptions: any[] = [];
@@ -694,7 +771,7 @@ export default defineComponent({
       update(() => {
         const value = val.toLowerCase();
         filteredOptions = options.filter(
-          (column: any) => column.toLowerCase().indexOf(value) > -1
+          (column: any) => column.toLowerCase().indexOf(value) > -1,
         );
       });
       return filteredOptions;
@@ -706,7 +783,7 @@ export default defineComponent({
         indexOptions.value = streams.value[formData.value.stream_type].map(
           (data: any) => {
             return data.name;
-          }
+          },
         );
         return;
       }
@@ -746,7 +823,7 @@ export default defineComponent({
     const removeField = (field: any) => {
       formData.value.query_condition.conditions =
         formData.value.query_condition.conditions.filter(
-          (_field: any) => _field.id !== field.id
+          (_field: any) => _field.id !== field.id,
         );
     };
 
@@ -761,7 +838,7 @@ export default defineComponent({
     const removeVariable = (variable: any) => {
       formData.value.context_attributes =
         formData.value.context_attributes.filter(
-          (_variable: any) => _variable.id !== variable.id
+          (_variable: any) => _variable.id !== variable.id,
         );
     };
 
@@ -773,22 +850,24 @@ export default defineComponent({
       if (getSelectedTab.value === "custom")
         previewQuery.value = generateSqlQuery();
       else if (getSelectedTab.value === "sql")
-        previewQuery.value = formData.value.query_condition.sql;
+        previewQuery.value = formData.value.query_condition.sql.trim();
       else if (getSelectedTab.value === "promql")
-        previewQuery.value = formData.value.query_condition.promql;
+        previewQuery.value = formData.value.query_condition.promql.trim();
 
       if (formData.value.is_real_time === "true") {
         previewQuery.value = generateSqlQuery();
       }
 
       await nextTick();
-      previewAlertRef.value.refreshData();
+      if (getSelectedTab.value !== "sql") {
+        previewAlertRef.value.refreshData();
+      }
     };
 
-    const getFromattedCondition = (
+    const getFormattedCondition = (
       column: string,
       operator: string,
-      value: number | string
+      value: number | string,
     ) => {
       let condition = "";
       switch (operator) {
@@ -833,10 +912,10 @@ export default defineComponent({
                 ? condition.value
                 : `'${condition.value}'`;
 
-            return getFromattedCondition(
+            return getFormattedCondition(
               condition.column,
               condition.operator,
-              value
+              value,
             );
           }
         })
@@ -847,7 +926,7 @@ export default defineComponent({
 
       if (!isAggregationEnabled.value) {
         query +=
-          ` COUNT(*) as zo_sql_val FROM ${formData.value.stream_name} ` +
+          ` COUNT(*) as zo_sql_val FROM \"${formData.value.stream_name}\" ` +
           whereClause +
           " GROUP BY zo_sql_key ORDER BY zo_sql_key ASC";
       } else {
@@ -861,14 +940,14 @@ export default defineComponent({
         formData.value.query_condition.aggregation.group_by.forEach(
           (column: any) => {
             if (column.trim().length) groupByCols.push(column);
-          }
+          },
         );
 
         let concatGroupBy = "";
         if (groupByCols.length) {
           groupByAlias = ", x_axis_2";
           concatGroupBy = `, concat(${groupByCols.join(
-            ",' : ',"
+            ",' : ',",
           )}) as x_axis_2`;
         }
 
@@ -883,18 +962,18 @@ export default defineComponent({
         if (isAggValid) {
           if (percentileFunctions[aggFn]) {
             query +=
-              ` approx_percentile_cont(${column}, ${percentileFunctions[aggFn]}) as zo_sql_val ${concatGroupBy} FROM ${formData.value.stream_name} ` +
+              ` approx_percentile_cont(${column}, ${percentileFunctions[aggFn]}) as zo_sql_val ${concatGroupBy} FROM \"${formData.value.stream_name}\" ` +
               whereClause +
               ` GROUP BY zo_sql_key ${groupByAlias} ORDER BY zo_sql_key ASC`;
           } else {
             query +=
-              ` ${aggFn}(${column}) as zo_sql_val ${concatGroupBy} FROM ${formData.value.stream_name} ` +
+              ` ${aggFn}(${column}) as zo_sql_val ${concatGroupBy} FROM \"${formData.value.stream_name}\" ` +
               whereClause +
               ` GROUP BY zo_sql_key ${groupByAlias} ORDER BY zo_sql_key ASC`;
           }
         } else {
           query +=
-            ` COUNT(*) as zo_sql_val ${concatGroupBy} FROM ${formData.value.stream_name} ` +
+            ` COUNT(*) as zo_sql_val ${concatGroupBy} FROM \"${formData.value.stream_name}\" ` +
             whereClause +
             ` GROUP BY zo_sql_key ${groupByAlias} ORDER BY zo_sql_key ASC`;
         }
@@ -908,6 +987,28 @@ export default defineComponent({
     const onInputUpdate = async (name: string, value: any) => {
       if (showPreview.value) {
         debouncedPreviewAlert();
+      }
+    };
+    const getParser = (sqlQuery: string) => {
+      try {
+        // As default is a reserved keyword in sql-parser, we are replacing it with default1
+        const regex = /\bdefault\b/g;
+        const columns = parser.astify(
+          sqlQuery.replace(regex, "default1"),
+        ).columns;
+        for (const column of columns) {
+          if (column.expr.column === "*") {
+            sqlQueryErrorMsg.value = "Selecting all columns is not allowed";
+            return false;
+          }
+        }
+        return true;
+      } catch (error) {
+        // In catch block we are returning true, as we just wanted to validate if user have added * in the query to select all columns
+        // select field from default // here default is not wrapped in "" so node sql parser will throw error as default is a reserved keyword. But our Backend supports this query without quotes
+        // Query will be validated in the backend
+        console.log(error);
+        return true;
       }
     };
 
@@ -931,19 +1032,19 @@ export default defineComponent({
       });
 
       payload.trigger_condition.threshold = parseInt(
-        formData.value.trigger_condition.threshold
+        formData.value.trigger_condition.threshold,
       );
 
       payload.trigger_condition.period = parseInt(
-        formData.value.trigger_condition.period
+        formData.value.trigger_condition.period,
       );
 
       payload.trigger_condition.frequency = parseInt(
-        formData.value.trigger_condition.frequency
+        formData.value.trigger_condition.frequency,
       );
 
       payload.trigger_condition.silence = parseInt(
-        formData.value.trigger_condition.silence
+        formData.value.trigger_condition.silence,
       );
 
       payload.description = formData.value.description.trim();
@@ -961,6 +1062,12 @@ export default defineComponent({
 
       if (getSelectedTab.value === "promql") {
         payload.query_condition.sql = "";
+      }
+
+      if (formData.value.query_condition.vrl_function) {
+        payload.query_condition.vrl_function = b64EncodeUnicode(
+          formData.value.query_condition.vrl_function.trim(),
+        );
       }
 
       if (beingUpdated) {
@@ -1040,6 +1147,96 @@ export default defineComponent({
       return true;
     };
 
+    const validateSqlQuery = async () => {
+      // Delaying the validation by 300ms, as editor has debounce of 300ms. Else old value will be used for validation
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      if (!getParser(formData.value.query_condition.sql)) {
+        return;
+      }
+
+      const query = buildQueryPayload({
+        sqlMode: true,
+        streamName: formData.value.stream_name,
+      });
+
+      delete query.aggs;
+
+      // We get 15 minutes time range for the query, so reducing it by 13 minutes to get 2 minute data
+      query.query.start_time = query.query.start_time + 780000000;
+
+      query.query.sql = formData.value.query_condition.sql;
+
+      if (formData.value.query_condition.vrl_function)
+        query.query.query_fn = b64EncodeUnicode(
+          formData.value.query_condition.vrl_function,
+        );
+
+      validateSqlQueryPromise.value = new Promise((resolve, reject) => {
+        searchService
+          .search({
+            org_identifier: store.state.selectedOrganization.identifier,
+            query,
+            page_type: "logs",
+          })
+          .then((res: any) => {
+            sqlQueryErrorMsg.value = "";
+
+            if (res.data?.function_error) {
+              vrlFunctionError.value = res.data.function_error;
+              q.notify({
+                type: "negative",
+                message: "Invalid VRL Function",
+                timeout: 3000,
+              });
+              reject("function_error");
+            } else vrlFunctionError.value = "";
+
+            resolve("");
+          })
+          .catch((err: any) => {
+            sqlQueryErrorMsg.value = err.response?.data?.message
+              ? err.response?.data?.message
+              : "Invalid SQL Query";
+
+            // Show error only if it is not real time alert
+            // This case happens when user enters invalid query and then switches to real time alert
+            if (formData.value.query_condition.type === "sql")
+              q.notify({
+                type: "negative",
+                message: "Invalid SQL Query : " + err.response?.data?.message,
+                timeout: 3000,
+              });
+
+            reject("sql_error");
+          });
+      });
+    };
+
+    const updateFunctionVisibility = () => {
+      // if validateSqlQueryPromise has error "function_error" then reset the promise when function is disabled
+      if (!showVrlFunction.value && vrlFunctionError.value) {
+        validateSqlQueryPromise.value = Promise.resolve("");
+        vrlFunctionError.value = "";
+      }
+    };
+    const updateMultiTimeRange = (value: any) => {
+      if (value) {
+        formData.value.query_condition.multi_time_range = value;
+      }
+    };
+
+    const routeToCreateDestination = () => {
+      const url = router.resolve({
+          name: "alertDestinations",
+          query: {
+            action: "add",
+            org_identifier: store.state.selectedOrganization.identifier,
+          },
+        }).href;
+      window.open(url, "_blank");
+    };
+
     return {
       t,
       q,
@@ -1058,7 +1255,7 @@ export default defineComponent({
       selectedRelativePeriod,
       relativePeriods,
       editorUpdate,
-      updateCondtions,
+      updateConditions,
       updateStreamFields,
       updateEditorContent,
       triggerCols,
@@ -1085,12 +1282,26 @@ export default defineComponent({
       addAlertFormRef,
       validateInputs,
       getAlertPayload,
+      getParser,
       onInputUpdate,
       showPreview,
       streamFieldsMap,
       previewQuery,
       previewAlertRef,
       outlinedInfo,
+      getTimezoneOffset,
+      showVrlFunction,
+      validateSqlQuery,
+      validateSqlQueryPromise,
+      isValidResourceName,
+      sqlQueryErrorMsg,
+      vrlFunctionError,
+      updateFunctionVisibility,
+      convertDateToTimestamp,
+      getTimezonesByOffset,
+      showTimezoneWarning,
+      updateMultiTimeRange,
+      routeToCreateDestination,
     };
   },
 
@@ -1112,11 +1323,31 @@ export default defineComponent({
       this.disableColor = "grey-5";
       this.formData = cloneDeep(this.modelValue);
       this.isAggregationEnabled = !!this.formData.query_condition.aggregation;
+
+      if (!this.formData.trigger_condition?.timezone) {
+        if (this.formData.tz_offset === 0) {
+          this.formData.trigger_condition.timezone = "UTC";
+        } else {
+          this.getTimezonesByOffset(this.formData.tz_offset).then(
+            (res: any) => {
+              if (res.length > 1) this.showTimezoneWarning = true;
+              this.formData.trigger_condition.timezone = res[0];
+            },
+          );
+        }
+      }
+
+      if (this.formData.query_condition.vrl_function) {
+        this.showVrlFunction = true;
+        this.formData.query_condition.vrl_function = b64DecodeUnicode(
+          this.formData.query_condition.vrl_function,
+        );
+      }
     }
 
     this.formData.is_real_time = this.formData.is_real_time.toString();
     this.formData.context_attributes = Object.keys(
-      this.formData.context_attributes
+      this.formData.context_attributes,
     ).map((attr) => {
       return {
         key: attr,
@@ -1147,7 +1378,25 @@ export default defineComponent({
         message: `${rejectedEntries.length} file(s) did not pass validation constraints`,
       });
     },
-    onSubmit() {
+
+    async onSubmit() {
+      // Delaying submission by 500ms to allow the form to validate, as query is validated in validateSqlQuery method
+      // When user updated query and click on save
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      if (
+        this.formData.is_real_time == "false" &&
+        this.formData.query_condition.type == "sql" &&
+        !this.getParser(this.formData.query_condition.sql)
+      ) {
+        this.q.notify({
+          type: "negative",
+          message: "Selecting all Columns in SQL query is not allowed.",
+          timeout: 1500,
+        });
+        return false;
+      }
+
       if (this.formData.stream_name == "") {
         this.q.notify({
           type: "negative",
@@ -1157,7 +1406,37 @@ export default defineComponent({
         return false;
       }
 
-      this.addAlertForm.validate().then((valid: any) => {
+      if (
+        this.formData.is_real_time == "false" &&
+        this.formData.trigger_condition.frequency_type == "cron"
+      ) {
+        const now = new Date();
+
+        // Get the day, month, and year from the date object
+        const day = String(now.getDate()).padStart(2, "0");
+        const month = String(now.getMonth() + 1).padStart(2, "0"); // January is 0!
+        const year = now.getFullYear();
+
+        // Combine them in the DD-MM-YYYY format
+        const date = `${day}-${month}-${year}`;
+
+        // Get the hours and minutes, ensuring they are formatted with two digits
+        const hours = String(now.getHours()).padStart(2, "0");
+        const minutes = String(now.getMinutes()).padStart(2, "0");
+
+        // Combine them in the HH:MM format
+        const time = `${hours}:${minutes}`;
+
+        const convertedDateTime = this.convertDateToTimestamp(
+          date,
+          time,
+          this.formData.trigger_condition.timezone,
+        );
+
+        this.formData.tz_offset = convertedDateTime.offset;
+      }
+
+      this.addAlertForm.validate().then(async (valid: any) => {
         if (!valid) {
           return false;
         }
@@ -1171,12 +1450,29 @@ export default defineComponent({
           timeout: 2000,
         });
 
+        if (
+          this.formData.is_real_time == "false" &&
+          this.formData.query_condition.type == "sql"
+        ) {
+          try {
+            // Wait for the promise to resolve
+            // Storing the SQL query validation promise in a variable
+            // Case: When user edits the query and directly saves it without waiting for the validation to complete
+            // So waiting here for sql validation to complete
+            await this.validateSqlQueryPromise;
+          } catch (error) {
+            dismiss();
+            console.log("Error while validating sql query");
+            return false;
+          }
+        }
+
         if (this.beingUpdated) {
           callAlert = alertsService.update(
             this.store.state.selectedOrganization.identifier,
             payload.stream_name,
             payload.stream_type,
-            payload
+            payload,
           );
           callAlert
             .then((res: { data: any }) => {
@@ -1191,11 +1487,14 @@ export default defineComponent({
             })
             .catch((err: any) => {
               dismiss();
-              this.q.notify({
+              if(err.response?.status != 403){
+                this.q.notify({
                 type: "negative",
                 message:
                   err.response?.data?.error || err.response?.data?.message,
-              });
+                });
+              }
+              
             });
           segment.track("Button Click", {
             button: "Update Alert",
@@ -1211,7 +1510,7 @@ export default defineComponent({
             this.store.state.selectedOrganization.identifier,
             payload.stream_name,
             payload.stream_type,
-            payload
+            payload,
           );
 
           callAlert
@@ -1227,11 +1526,14 @@ export default defineComponent({
             })
             .catch((err: any) => {
               dismiss();
-              this.q.notify({
+              if(err.response?.status != 403){
+                this.q.notify({
                 type: "negative",
                 message:
                   err.response?.data?.error || err.response?.data?.message,
-              });
+                });
+              }
+              
             });
           segment.track("Button Click", {
             button: "Save Alert",

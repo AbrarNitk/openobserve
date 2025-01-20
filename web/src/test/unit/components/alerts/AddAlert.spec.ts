@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,6 +21,7 @@ import AddAlert from "@/components/alerts/AddAlert.vue";
 import i18n from "@/locales";
 import store from "../../helpers/store";
 import AlertService from "@/services/alerts";
+// @ts-ignore
 import { rest } from "msw";
 import router from "../../helpers/router";
 
@@ -156,7 +157,7 @@ describe("Alert List", async () => {
       global.server.use(
         rest.post(
           `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/${stream_name}/alerts/${alert_name}`,
-          (req, res, ctx) => {
+          (req: any, res: any, ctx: any) => {
             return res(ctx.status(200), ctx.json({ code: 200 }));
           }
         )

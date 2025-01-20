@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -26,6 +26,9 @@ import dotenv from "dotenv";
 import fs from "fs-extra";
 import monacoEditorPlugin from "vite-plugin-monaco-editor";
 import visualizer from "rollup-plugin-visualizer";
+import "dotenv/config";
+
+import istanbul from "vite-plugin-istanbul";
 
 // Load environment variables from the appropriate .env file
 if (process.env.NODE_ENV === "production") {
@@ -46,7 +49,7 @@ const enterpriseResolverPlugin = {
 
       const enterprisePath = path.resolve(
         __dirname,
-        `./src/enterprise/${fileName}`
+        `./src/enterprise/${fileName}`,
       );
       const defaultPath = path.resolve(__dirname, `./src/${fileName}`);
 
@@ -108,9 +111,17 @@ export default defineConfig({
     quasar({
       sassVariables: "src/styles/quasar-variables.sass",
     }),
+    process.env.VITE_COVERAGE === "true" &&
+      istanbul({
+        include: "src/**/*",
+        exclude: ["node_modules", "test/"],
+        extension: [".js", ".ts", ".vue"],
+        requireEnv: false,
+        forceBuildInstrument: true,
+      }),
     enterpriseResolverPlugin,
     vueJsx(),
-    monacoEditorPlugin({
+    monacoEditorPlugin.default({
       customDistPath: () => path.resolve(__dirname, "dist/monacoeditorwork"),
     }),
     isTesting && monacoEditorTestResolver(),
@@ -119,7 +130,7 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
       "@enterprise": fileURLToPath(
-        new URL("./src/enterprise", import.meta.url)
+        new URL("./src/enterprise", import.meta.url),
       ),
       stream: "rollup-plugin-node-polyfills/polyfills/stream",
       events: "rollup-plugin-node-polyfills/polyfills/events",
@@ -132,29 +143,31 @@ export default defineConfig({
   build: {
     sourcemap: false,
     target: "es2020",
+    chunkSizeWarningLimit: 3000,
     rollupOptions: {
       plugins: [
         nodePolyfills(),
-        visualizer({
+        visualizer.default({
           open: true,
           gzipSize: true,
           brotliSize: true,
         }),
       ],
-      manualChunks: {
-        "o2cs-analytics": ["rudder-sdk-js"],
-        "o2cs-oo-rum": [
-          "@openobserve/browser-logs",
-          "@openobserve/browser-rum",
-        ],
-        "o2cs-date-fns": ["date-fns", "date-fns-tz"],
-      },
       output: {
+        manualChunks: {
+          "o2cs-analytics": ["rudder-sdk-js"],
+          "o2cs-oo-rum": [
+            "@openobserve/browser-logs",
+            "@openobserve/browser-rum",
+          ],
+          "o2cs-date-fns": ["date-fns", "date-fns-tz"],
+          "editor.api": ["monaco-editor"],
+        },
         chunkFileNames: ({ name }) => {
           if (name.startsWith("o2cs-")) {
             return `assets/vendor/${name}.[hash].js`;
           }
-          
+
           if (name.includes("editor.api")) {
             return `assets/${name}.v1.js`;
           }
@@ -174,9 +187,9 @@ export default defineConfig({
   test: {
     enable: true,
     global: true,
-    setupFiles: "src/test/unit/helpers/setupTests.ts",
+    setupFiles: "test/unit/helpers/setupTests.ts",
     deps: {
-      inline: ["monaco-editor"],
+      inline: ["monaco-editor", "vitest-canvas-mock"],
     },
     coverage: {
       reporter: ["text", "json", "html"],
@@ -198,9 +211,15 @@ export default defineConfig({
         "env.d.ts",
       ],
     },
+    threads: false,
     environment: "jsdom",
     cache: false,
     maxConcurrency: 20,
     update: false,
+    environmentOptions: {
+      jsdom: {
+        resources: "usable",
+      },
+    },
   },
 });

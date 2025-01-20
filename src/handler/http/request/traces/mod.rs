@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,20 +16,18 @@
 use std::{collections::HashMap, io::Error};
 
 use actix_web::{get, http, post, web, HttpRequest, HttpResponse};
-use config::{get_config, ider, meta::stream::StreamType, metrics, utils::json};
+use config::{get_config, meta::stream::StreamType, metrics, utils::json};
 use infra::errors;
-use opentelemetry::{global, trace::TraceContextExt};
 use serde::Serialize;
-use tracing::Instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::{Instrument, Span};
 
 use crate::{
     common::{
         meta::{self, http::HttpResponse as MetaHttpResponse},
-        utils::http::RequestHeaderExtractor,
+        utils::http::get_or_create_trace_id,
     },
     handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO},
-    service::{search as SearchService, traces::otlp_http},
+    service::{search as SearchService, traces},
 };
 
 /// TracesIngest
@@ -76,9 +74,9 @@ async fn handle_req(
         .get(&get_config().grpc.stream_header_key)
         .map(|header| header.to_str().unwrap());
     if content_type.eq(CONTENT_TYPE_PROTO) {
-        otlp_http::traces_proto(&org_id, body, in_stream_name).await
+        traces::otlp_proto(&org_id, body, in_stream_name).await
     } else if content_type.starts_with(CONTENT_TYPE_JSON) {
-        otlp_http::traces_json(&org_id, body, in_stream_name).await
+        traces::otlp_json(&org_id, body, in_stream_name).await
     } else {
         Ok(
             HttpResponse::BadRequest().json(meta::http::HttpResponse::error(
@@ -132,33 +130,33 @@ pub async fn get_latest_traces(
     in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let (org_id, stream_name) = path.into_inner();
     let cfg = get_config();
-    let mut http_span = None;
-    let trace_id = if cfg.common.tracing_enabled {
-        let ctx = global::get_text_map_propagator(|propagator| {
-            propagator.extract(&RequestHeaderExtractor::new(in_req.headers()))
-        });
-        ctx.span().span_context().trace_id().to_string()
-    } else if cfg.common.tracing_search_enabled {
-        let span = tracing::info_span!(
+
+    let (org_id, stream_name) = path.into_inner();
+    let http_span = if cfg.common.tracing_search_enabled {
+        tracing::info_span!(
             "/api/{org_id}/{stream_name}/traces/latest",
             org_id = org_id.clone(),
             stream_name = stream_name.clone()
-        );
-        let trace_id = span.context().span().span_context().trace_id().to_string();
-        http_span = Some(span);
-        trace_id
+        )
     } else {
-        ider::uuid()
+        Span::none()
     };
-
+    let trace_id = get_or_create_trace_id(in_req.headers(), &http_span);
+    let user_id = in_req
+        .headers()
+        .get("user_id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let query = web::Query::<HashMap<String, String>>::from_query(in_req.query_string()).unwrap();
 
     // Check permissions on stream
 
     #[cfg(feature = "enterprise")]
     {
+        use o2_enterprise::enterprise::openfga::meta::mapping::OFGA_MODELS;
+
         use crate::common::{
             infra::config::USERS,
             utils::auth::{is_root_user, AuthExtractor},
@@ -169,21 +167,28 @@ pub async fn get_latest_traces(
                 .get(&format!("{org_id}/{}", user_id.to_str().unwrap()))
                 .unwrap()
                 .clone();
+            let stream_type_str = StreamType::Traces.to_string();
 
-            if user.is_external
-                && !crate::handler::http::auth::validator::check_permissions(
-                    user_id.to_str().unwrap(),
-                    AuthExtractor {
-                        auth: "".to_string(),
-                        method: "GET".to_string(),
-                        o2_type: format!("{}:{}", StreamType::Traces, stream_name),
-                        org_id: org_id.clone(),
-                        bypass_check: false,
-                        parent_id: "".to_string(),
-                    },
-                    Some(user.role),
-                )
-                .await
+            if !crate::handler::http::auth::validator::check_permissions(
+                user_id.to_str().unwrap(),
+                AuthExtractor {
+                    auth: "".to_string(),
+                    method: "GET".to_string(),
+                    o2_type: format!(
+                        "{}:{}",
+                        OFGA_MODELS
+                            .get(stream_type_str.as_str())
+                            .map_or(stream_type_str.as_str(), |model| model.key),
+                        stream_name
+                    ),
+                    org_id: org_id.clone(),
+                    bypass_check: false,
+                    parent_id: "".to_string(),
+                },
+                user.role,
+                user.is_external,
+            )
+            .await
             {
                 return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
             }
@@ -214,11 +219,29 @@ pub async fn get_latest_traces(
         return Ok(MetaHttpResponse::bad_request("end_time is empty"));
     }
 
+    let max_query_range = crate::common::utils::stream::get_max_query_range(
+        &[stream_name.clone()],
+        org_id.as_str(),
+        &user_id,
+        StreamType::Traces,
+    )
+    .await;
+    let mut range_error = String::new();
+    if max_query_range > 0 && (end_time - start_time) > max_query_range * 3600 * 1_000_000 {
+        start_time = end_time - max_query_range * 3600 * 1_000_000;
+        range_error = format!(
+            "Query duration is modified due to query range restriction of {} hours",
+            max_query_range
+        );
+    }
+
     let timeout = query
         .get("timeout")
         .map_or(0, |v| v.parse::<i64>().unwrap_or(0));
 
-    let cfg = get_config();
+    metrics::QUERY_PENDING_NUMS
+        .with_label_values(&[&org_id])
+        .inc();
     // get a local search queue lock
     #[cfg(not(feature = "enterprise"))]
     let locker = SearchService::QUEUE_LOCKER.clone();
@@ -236,6 +259,9 @@ pub async fn get_latest_traces(
         "http traces latest API wait in queue took: {} ms",
         took_wait
     );
+    metrics::QUERY_PENDING_NUMS
+        .with_label_values(&[&org_id])
+        .dec();
 
     // search
     let query_sql = format!(
@@ -255,21 +281,22 @@ pub async fn get_latest_traces(
             start_time,
             end_time,
             sort_by: None,
-            sql_mode: "full".to_string(),
             quick_mode: false,
             query_type: "".to_string(),
             track_total_hits: false,
-            query_context: None,
             uses_zo_fn: false,
             query_fn: None,
             skip_wal: false,
+            streaming_output: false,
+            streaming_id: None,
         },
-        aggs: HashMap::new(),
         encoding: config::meta::search::RequestEncoding::Empty,
         regions: vec![],
         clusters: vec![],
         timeout,
         search_type: None,
+        search_event_context: None,
+        use_cache: None,
     };
     let stream_type = StreamType::Traces;
     let user_id = in_req
@@ -280,12 +307,9 @@ pub async fn get_latest_traces(
         .ok()
         .map(|v| v.to_string());
 
-    let search_fut = SearchService::search(&trace_id, &org_id, stream_type, user_id.clone(), &req);
-    let search_res = if !cfg.common.tracing_enabled && cfg.common.tracing_search_enabled {
-        search_fut.instrument(http_span.clone().unwrap()).await
-    } else {
-        search_fut.await
-    };
+    let search_res = SearchService::search(&trace_id, &org_id, stream_type, user_id.clone(), &req)
+        .instrument(http_span.clone())
+        .await;
 
     let resp_search = match search_res {
         Ok(res) => res,
@@ -334,11 +358,12 @@ pub async fn get_latest_traces(
         let trace_id = item.get("trace_id").unwrap().as_str().unwrap().to_string();
         let trace_start_time = item.get("trace_start_time").unwrap().as_i64().unwrap();
         let trace_end_time = item.get("trace_end_time").unwrap().as_i64().unwrap();
-        if trace_start_time < start_time {
-            start_time = trace_start_time;
+        // trace time is nanosecond, need to compare with microsecond
+        if trace_start_time / 1000 < start_time {
+            start_time = trace_start_time / 1000;
         }
-        if trace_end_time > end_time {
-            end_time = trace_end_time;
+        if trace_end_time / 1000 > end_time {
+            end_time = trace_end_time / 1000;
         }
         traces_data.insert(
             trace_id.clone(),
@@ -372,13 +397,11 @@ pub async fn get_latest_traces(
     let mut traces_service_name: HashMap<String, HashMap<String, u16>> = HashMap::new();
 
     loop {
-        let search_fut =
-            SearchService::search(&trace_id, &org_id, stream_type, user_id.clone(), &req);
-        let search_res = if !cfg.common.tracing_enabled && cfg.common.tracing_search_enabled {
-            search_fut.instrument(http_span.clone().unwrap()).await
-        } else {
-            search_fut.await
-        };
+        let search_res =
+            SearchService::search(&trace_id, &org_id, stream_type, user_id.clone(), &req)
+                .instrument(http_span.clone())
+                .await;
+
         let resp_search = match search_res {
             Ok(res) => res,
             Err(err) => {
@@ -502,6 +525,9 @@ pub async fn get_latest_traces(
     resp.insert("size", json::Value::from(size));
     resp.insert("hits", json::to_value(traces_data).unwrap());
     resp.insert("trace_id", json::Value::from(trace_id));
+    if !range_error.is_empty() {
+        resp.insert("function_error", json::Value::String(range_error));
+    }
     Ok(HttpResponse::Ok().json(resp))
 }
 

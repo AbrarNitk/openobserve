@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,15 +15,13 @@
 
 use std::{path::Path, sync::Arc};
 
-use arrow::{ipc::writer::StreamWriter, record_batch::RecordBatch};
-use arrow_schema::Schema;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use config::{
     get_config, ider,
-    meta::stream::{PartitionTimeLevel, StreamType},
+    meta::stream::{PartitionTimeLevel, StreamParams, StreamType},
     metrics,
-    utils::asynchronism::file::get_file_contents,
-    FILE_EXT_ARROW, FILE_EXT_JSON,
+    utils::async_file::get_file_contents,
+    FILE_EXT_JSON,
 };
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -33,16 +31,18 @@ use tokio::{
     sync::RwLock,
 };
 
-use crate::common::meta::stream::StreamParams;
-
-type RwData = RwLock<HashMap<String, Arc<RwFile>>>;
-
 // MANAGER for manage using WAL files, in use, should not move to s3
 static MANAGER: Lazy<Manager> = Lazy::new(Manager::new);
 
 // SEARCHING_FILES for searching files, in use, should not move to s3
-static SEARCHING_FILES: Lazy<tokio::sync::RwLock<SearchingFileLocker>> =
-    Lazy::new(|| tokio::sync::RwLock::new(SearchingFileLocker::new()));
+static SEARCHING_FILES: Lazy<parking_lot::RwLock<SearchingFileLocker>> =
+    Lazy::new(|| parking_lot::RwLock::new(SearchingFileLocker::new()));
+
+// SEARCHING_REQUESTS for searching requests, in use, should not move to s3
+static SEARCHING_REQUESTS: Lazy<parking_lot::RwLock<HashMap<String, Vec<String>>>> =
+    Lazy::new(Default::default);
+
+type RwData = RwLock<HashMap<String, Arc<RwFile>>>;
 
 struct SearchingFileLocker {
     inner: HashMap<String, usize>,
@@ -80,6 +80,11 @@ impl SearchingFileLocker {
     pub fn exist(&self, file: &str) -> bool {
         self.inner.get(file).is_some()
     }
+
+    pub fn clean(&mut self) {
+        self.inner.clear();
+        self.inner.shrink_to_fit();
+    }
 }
 
 struct Manager {
@@ -88,19 +93,17 @@ struct Manager {
 
 pub struct RwFile {
     file: Option<RwLock<File>>,
-    arrow_file: Option<RwLock<StreamWriter<std::fs::File>>>,
     org_id: String,
     stream_name: String,
     stream_type: StreamType,
     dir: String,
     name: String,
     expired: i64,
-    use_arrow: bool,
 }
 
-pub async fn init() -> Result<(), anyhow::Error> {
+pub fn init() -> Result<(), anyhow::Error> {
     _ = MANAGER.data.len();
-    _ = SEARCHING_FILES.read().await.len();
+    _ = SEARCHING_FILES.read().len();
     Ok(())
 }
 
@@ -111,19 +114,7 @@ pub async fn get_or_create(
     key: &str,
 ) -> Arc<RwFile> {
     MANAGER
-        .get_or_create(thread_id, stream, partition_time_level, key, None)
-        .await
-}
-
-pub async fn get_or_create_arrow(
-    thread_id: usize,
-    stream: StreamParams,
-    partition_time_level: Option<PartitionTimeLevel>,
-    key: &str,
-    schema: Option<Schema>,
-) -> Arc<RwFile> {
-    MANAGER
-        .get_or_create(thread_id, stream, partition_time_level, key, schema)
+        .get_or_create(thread_id, stream, partition_time_level, key)
         .await
 }
 
@@ -197,7 +188,6 @@ impl Manager {
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        schema: Option<Schema>,
     ) -> Arc<RwFile> {
         let stream_type = stream.stream_type;
         let full_key = format!(
@@ -208,8 +198,7 @@ impl Manager {
         if let Some(f) = data.get(&full_key) {
             return f.clone();
         }
-        let file =
-            Arc::new(RwFile::new(thread_id, stream, partition_time_level, key, schema).await);
+        let file = Arc::new(RwFile::new(thread_id, stream, partition_time_level, key).await);
         if !stream_type.eq(&StreamType::EnrichmentTables) {
             data.insert(full_key, file.clone());
         };
@@ -222,12 +211,11 @@ impl Manager {
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        schema: Option<Schema>,
     ) -> Arc<RwFile> {
         if let Some(file) = self.get(thread_id, stream.clone(), key).await {
             file
         } else {
-            self.create(thread_id, stream, partition_time_level, key, schema)
+            self.create(thread_id, stream, partition_time_level, key)
                 .await
         }
     }
@@ -255,56 +243,31 @@ impl RwFile {
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        schema: Option<Schema>,
     ) -> RwFile {
-        let use_arrow = schema.is_some();
         let cfg = get_config();
-        let mut dir_path = if use_arrow {
-            format!(
-                "{}files/{}/{}/{}/",
-                &cfg.common.data_idx_dir, stream.org_id, stream.stream_type, stream.stream_name
-            )
-        } else {
-            format!(
-                "{}files/{}/{}/{}/",
-                &cfg.common.data_wal_dir, stream.org_id, stream.stream_type, stream.stream_name
-            )
-        };
+        let mut dir_path = format!(
+            "{}files/{}/{}/{}/",
+            &cfg.common.data_wal_dir, stream.org_id, stream.stream_type, stream.stream_name
+        );
         // Hack for file_list
         let file_list_prefix = "/files//file_list//";
         if dir_path.contains(file_list_prefix) {
             dir_path = dir_path.replace(file_list_prefix, "/file_list/");
         }
         let id = ider::generate();
-        let file_name = if use_arrow {
-            format!("{thread_id}/{key}/{id}{}", FILE_EXT_ARROW)
-        } else {
-            format!("{thread_id}/{key}/{id}{}", FILE_EXT_JSON)
-        };
+        let file_name = format!("{thread_id}/{key}/{id}{}", FILE_EXT_JSON);
         let file_path = format!("{dir_path}{file_name}");
         create_dir_all(Path::new(&file_path).parent().unwrap())
             .await
             .unwrap();
 
-        let (file, arrow_file) = if use_arrow {
-            let file_path = format!("{dir_path}{file_name}");
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file_path)
-                .unwrap();
-            let writer = StreamWriter::try_new(file, &schema.unwrap()).unwrap();
-
-            (None, Some(RwLock::new(writer)))
-        } else {
-            let f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&file_path)
-                .await
-                .unwrap_or_else(|e| panic!("open wal file [{file_path}] error: {e}"));
-            (Some(RwLock::new(f)), None)
-        };
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .await
+            .unwrap_or_else(|e| panic!("open wal file [{file_path}] error: {e}"));
+        let file = Some(RwLock::new(f));
 
         let time_now: DateTime<Utc> = Utc::now();
         let level_duration = partition_time_level.unwrap_or_default().duration();
@@ -334,14 +297,12 @@ impl RwFile {
 
         RwFile {
             file,
-            arrow_file,
             org_id: stream.org_id.to_string(),
             stream_name: stream.stream_name.to_string(),
             stream_type: stream.stream_type,
             dir: dir_path,
             name: file_name,
             expired: ttl,
-            use_arrow,
         }
     }
 
@@ -366,55 +327,33 @@ impl RwFile {
     }
 
     #[inline]
-    pub async fn write_arrow(&self, data: RecordBatch) {
-        self.arrow_file
-            .as_ref()
-            .unwrap()
-            .write()
-            .await
-            .write(&data)
-            .unwrap()
-    }
-
-    #[inline]
     pub async fn read(&self) -> Result<Vec<u8>, std::io::Error> {
-        get_file_contents(&self.full_name()).await
+        get_file_contents(&self.full_name(), None).await
     }
 
     #[inline]
     pub async fn sync(&self) {
-        if let Some(file) = self.file.as_ref() {
-            file.write().await.sync_all().await.unwrap();
-        } else if let Some(arrow_file) = self.arrow_file.as_ref() {
-            arrow_file.write().await.finish().unwrap();
-        } else {
-            log::info!("Unable to sync file: {}", self.name)
-        }
+        self.file
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .sync_all()
+            .await
+            .unwrap()
     }
 
     #[inline]
     pub async fn size(&self) -> i64 {
-        if self.use_arrow {
-            self.arrow_file
-                .as_ref()
-                .unwrap()
-                .read()
-                .await
-                .get_ref()
-                .metadata()
-                .unwrap()
-                .len() as i64
-        } else {
-            self.file
-                .as_ref()
-                .unwrap()
-                .read()
-                .await
-                .metadata()
-                .await
-                .unwrap()
-                .len() as i64
-        }
+        self.file
+            .as_ref()
+            .unwrap()
+            .read()
+            .await
+            .metadata()
+            .await
+            .unwrap()
+            .len() as i64
     }
 
     #[inline]
@@ -441,23 +380,48 @@ impl RwFile {
     }
 }
 
-pub async fn lock_files(files: &[String]) {
-    let mut locker = SEARCHING_FILES.write().await;
+pub fn lock_files(files: &[String]) {
+    let mut locker = SEARCHING_FILES.write();
     for file in files.iter() {
         locker.lock(file.clone());
     }
 }
 
-pub async fn release_files(files: &[String]) {
-    let mut locker = SEARCHING_FILES.write().await;
+pub fn release_files(files: &[String]) {
+    let mut locker = SEARCHING_FILES.write();
     for file in files.iter() {
         locker.release(file);
     }
     locker.shrink_to_fit();
 }
 
-pub async fn lock_files_exists(file: &str) -> bool {
-    SEARCHING_FILES.read().await.exist(file)
+pub fn lock_files_exists(file: &str) -> bool {
+    SEARCHING_FILES.read().exist(file)
+}
+
+pub fn clean_lock_files() {
+    let mut locker = SEARCHING_FILES.write();
+    locker.clean();
+}
+
+pub fn lock_request(trace_id: &str, files: &[String]) {
+    log::info!("[trace_id {}] lock_request for wal files", trace_id);
+    let mut locker = SEARCHING_REQUESTS.write();
+    locker.insert(trace_id.to_string(), files.to_vec());
+}
+
+pub fn release_request(trace_id: &str) {
+    if !config::cluster::LOCAL_NODE.is_ingester() {
+        return;
+    }
+    log::info!("[trace_id {}] release_request for wal files", trace_id);
+    let mut locker = SEARCHING_REQUESTS.write();
+    let files = locker.remove(trace_id);
+    locker.shrink_to_fit();
+    drop(locker);
+    if let Some(files) = files {
+        release_files(&files);
+    }
 }
 
 #[cfg(test)]
@@ -488,7 +452,7 @@ mod tests {
         let stream_type = StreamType::Logs;
         let stream = StreamParams::new(org_id, stream_name, stream_type);
         let key = "test_key";
-        let file = RwFile::new(thread_id, stream, None, key, None).await;
+        let file = RwFile::new(thread_id, stream, None, key).await;
         let data = "test_data".to_string().into_bytes();
         file.write(&data).await;
         assert_eq!(file.read().await.unwrap(), data);

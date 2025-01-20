@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,7 +15,7 @@
 
 use std::{
     fs::{create_dir_all, remove_file, File, OpenOptions},
-    io::{self, Seek, SeekFrom, Write},
+    io::{BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -27,10 +27,11 @@ use crate::errors::*;
 
 pub struct Writer {
     path: PathBuf,
-    f: File,
+    f: BufWriter<File>,
     bytes_written: usize,
     uncompressed_bytes_written: usize,
     buffer: Vec<u8>,
+    synced: bool,
 }
 
 impl Writer {
@@ -40,6 +41,7 @@ impl Writer {
         stream_type: &str,
         id: u64,
         init_size: u64,
+        buffer_size: usize,
     ) -> Result<Self> {
         let path = super::build_file_path(root_dir, org_id, stream_type, id);
         create_dir_all(path.parent().unwrap()).context(FileOpenSnafu { path: path.clone() })?;
@@ -70,10 +72,11 @@ impl Writer {
 
         Ok(Self {
             path,
-            f,
+            f: BufWriter::with_capacity(buffer_size, f),
             bytes_written,
             uncompressed_bytes_written: bytes_written,
-            buffer: Vec::with_capacity(8 * 1204),
+            buffer: Vec::with_capacity(buffer_size),
+            synced: true,
         })
     }
 
@@ -88,7 +91,7 @@ impl Writer {
     }
 
     /// write the data to the wal file
-    pub fn write(&mut self, data: &[u8], sync: bool) -> Result<()> {
+    pub fn write(&mut self, data: &[u8]) -> Result<()> {
         // Ensure the write buffer is always empty before using it.
         self.buffer.clear();
         // And shrink the buffer below the maximum permitted size should the odd
@@ -124,7 +127,7 @@ impl Writer {
         })?;
 
         // Go back and write the chunk header values
-        let mut buf = io::Cursor::new(buf);
+        let mut buf = std::io::Cursor::new(buf);
         buf.set_position(0);
 
         buf.write_u32::<BigEndian>(checksum)
@@ -138,26 +141,39 @@ impl Writer {
 
         self.f.write_all(buf).context(WriteDataSnafu)?;
 
-        // fsync the fd
-        if sync {
-            self.sync()?;
-        }
-
         self.bytes_written += bytes_written;
         self.uncompressed_bytes_written += uncompressed_len;
+        self.synced = false;
 
         Ok(())
     }
 
-    pub fn sync(&self) -> Result<()> {
-        self.f.sync_all().context(FileSyncSnafu {
+    pub fn sync(&mut self) -> Result<()> {
+        if self.synced {
+            return Ok(());
+        }
+        self.f.flush().context(FileSyncSnafu {
             path: self.path.clone(),
         })?;
+        if !config::get_config().common.wal_fsync_disabled {
+            self.f.get_ref().sync_data().context(FileSyncSnafu {
+                path: self.path.clone(),
+            })?;
+        }
+        self.synced = true;
         Ok(())
     }
 
-    pub fn close(&self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         self.sync()
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Err(e) = self.close() {
+            log::error!("failed to close wal file: {}", e);
+        }
     }
 }
 
@@ -185,12 +201,12 @@ impl<W> Write for HasherWrapper<W>
 where
     W: Write,
 {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.hasher.update(buf);
         self.inner.write(buf)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
 }

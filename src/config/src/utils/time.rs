@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
 
 use crate::utils::json;
@@ -22,6 +22,8 @@ use crate::utils::json;
 // is in seconds or milliseconds or microseconds or nanoseconds
 pub static BASE_TIME: Lazy<DateTime<Utc>> =
     Lazy::new(|| Utc.with_ymd_and_hms(1971, 1, 1, 0, 0, 0).unwrap());
+
+pub static DAY_MICRO_SECS: i64 = 24 * 3600 * 1_000_000;
 
 // check format: 1s, 1m, 1h, 1d, 1w, 1y, 1h10m30s
 static TIME_UNITS: [(char, u64); 7] = [
@@ -42,6 +44,19 @@ pub fn now() -> DateTime<Utc> {
 #[inline(always)]
 pub fn now_micros() -> i64 {
     Utc::now().timestamp_micros()
+}
+
+#[inline(always)]
+pub fn hour_micros(n: i64) -> i64 {
+    Duration::try_hours(n).unwrap().num_microseconds().unwrap()
+}
+
+#[inline(always)]
+pub fn second_micros(n: i64) -> i64 {
+    Duration::try_seconds(n)
+        .unwrap()
+        .num_microseconds()
+        .unwrap()
 }
 
 #[inline(always)]
@@ -200,6 +215,27 @@ pub fn parse_timezone_to_offset(offset: &str) -> i64 {
         .fold(0, |acc, val| acc * 60 + val * 60);
 
     sign * seconds
+}
+
+#[inline(always)]
+pub fn parse_str_to_timestamp_micros_as_option(v: &str) -> Option<i64> {
+    match v.parse() {
+        Ok(i) => Some(parse_i64_to_timestamp_micros(i)),
+        Err(_) => match parse_str_to_time(v) {
+            Ok(v) => Some(v.timestamp_micros()),
+            Err(_) => None,
+        },
+    }
+}
+
+/// Get the end of the day timestamp_micros
+pub fn end_of_the_day(timestamp: i64) -> i64 {
+    let t = Utc.timestamp_nanos((timestamp + DAY_MICRO_SECS) * 1000);
+    let t_next_day_zero = Utc
+        .with_ymd_and_hms(t.year(), t.month(), t.day(), 0, 0, 0)
+        .unwrap()
+        .timestamp_micros();
+    t_next_day_zero - 1
 }
 
 #[cfg(test)]
@@ -363,5 +399,14 @@ mod tests {
         assert_eq!(parse_timezone_to_offset("CST"), 28800);
         assert_eq!(parse_timezone_to_offset("+08:00"), 28800);
         assert_eq!(parse_timezone_to_offset("-08:00"), -28800);
+    }
+
+    #[test]
+    fn test_end_of_the_day() {
+        let t = [1609459200000000, 1727740800000000];
+        let d = [1609545599999999, 1727827199999999];
+        for i in 0..t.len() {
+            assert_eq!(end_of_the_day(t[i]), d[i]);
+        }
     }
 }

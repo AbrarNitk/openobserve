@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -321,11 +321,7 @@ export default defineComponent({
 
     const updateMember = (data: any) => {
       if (data.data != undefined) {
-        usersState.users.forEach((member: any, key: number) => {
-          if (member.org_member_id == data.data.id) {
-            usersState.users[key].role = data.data.role;
-          }
-        });
+        getOrgMembers();
         showUpdateUserDialog.value = false;
       }
     };

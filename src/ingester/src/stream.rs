@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -40,7 +40,7 @@ impl Stream {
         &mut self,
         schema: Arc<Schema>,
         entry: Entry,
-        batch: Option<Arc<RecordBatchEntry>>,
+        batch: Arc<RecordBatchEntry>,
     ) -> Result<usize> {
         let mut arrow_size = 0;
         let partition = match self.partitions.get_mut(&entry.stream) {
@@ -49,17 +49,21 @@ impl Stream {
                 arrow_size += schema.size();
                 self.partitions
                     .entry(entry.schema_key.clone())
-                    .or_insert_with(|| Partition::new(schema))
+                    .or_insert_with(Partition::new)
             }
         };
         arrow_size += partition.write(entry, batch)?;
         Ok(arrow_size)
     }
 
-    pub(crate) fn read(&self, time_range: Option<(i64, i64)>) -> Result<Vec<ReadRecordBatchEntry>> {
+    pub(crate) fn read(
+        &self,
+        time_range: Option<(i64, i64)>,
+        partition_filters: &[(String, Vec<String>)],
+    ) -> Result<Vec<ReadRecordBatchEntry>> {
         let mut batches = Vec::with_capacity(self.partitions.len());
         for partition in self.partitions.values() {
-            batches.push(partition.read(time_range)?);
+            batches.push(partition.read(time_range, partition_filters)?);
         }
         Ok(batches)
     }

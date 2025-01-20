@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,12 +16,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use config::{cluster::LOCAL_NODE_UUID, utils::json};
+use config::{cluster::LOCAL_NODE, meta::promql::ClusterLeader, utils::json};
 
-use crate::{
-    common::{infra::config::METRIC_CLUSTER_LEADER, meta::prom::ClusterLeader},
-    service::db,
-};
+use crate::{common::infra::config::METRIC_CLUSTER_LEADER, service::db};
 
 pub async fn set_prom_cluster_info(cluster: &str, members: &[String]) -> Result<(), anyhow::Error> {
     let key = format!("/metrics_members/{cluster}");
@@ -90,7 +87,7 @@ pub async fn watch_prom_cluster_leader() -> Result<(), anyhow::Error> {
                 } else {
                     json::from_slice(&ev.value.unwrap()).unwrap()
                 };
-                if item_value.updated_by != LOCAL_NODE_UUID.to_string() {
+                if item_value.updated_by != LOCAL_NODE.uuid {
                     METRIC_CLUSTER_LEADER
                         .write()
                         .await

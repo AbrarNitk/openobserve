@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,7 +24,10 @@ use prometheus::{
 pub const NAMESPACE: &str = "zo";
 const HELP_SUFFIX: &str =
     "Please include 'organization, 'stream type', and 'stream' labels for this metric.";
-
+pub const SPAN_METRICS_BUCKET: [f64; 15] = [
+    0.1, 0.5, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0,
+    60000.0,
+];
 // http latency
 pub static HTTP_INCOMING_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     IntCounterVec::new(
@@ -120,6 +123,18 @@ pub static INGEST_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
             .namespace(NAMESPACE)
             .const_labels(create_const_labels()),
         &["organization", "stream", "stream_type"],
+    )
+    .expect("Metric created")
+});
+pub static INGEST_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "ingest_errors",
+            "Errors while ingesting records".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["organization", "stream_type", "stream", "error_type"],
     )
     .expect("Metric created")
 });
@@ -298,6 +313,58 @@ pub static QUERY_DISK_CACHE_FILES: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("Metric created")
 });
 
+// querier disk result cache stats
+pub static QUERY_DISK_RESULT_CACHE_USED_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "query_disk_result_cache_used_bytes",
+            "Querier disk result cache used bytes. ".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["organization", "stream_type"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_DISK_METRICS_CACHE_USED_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "query_disk_metrics_cache_used_bytes",
+            "Querier disk metrics result cached bytes. ".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+
+// query metrics cache stats
+pub static QUERY_METRICS_CACHE_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "query_metrics_cache_requests",
+            "Querier metrics cache requests. ".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_METRICS_CACHE_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "query_metrics_cache_hits",
+            "Querier metrics cache hits. ".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+
 // compactor stats
 pub static COMPACT_USED_TIME: Lazy<CounterVec> = Lazy::new(|| {
     CounterVec::new(
@@ -344,6 +411,18 @@ pub static COMPACT_DELAY_HOURS: Lazy<IntGaugeVec> = Lazy::new(|| {
         .namespace(NAMESPACE)
         .const_labels(create_const_labels()),
         &["organization", "stream", "stream_type"],
+    )
+    .expect("Metric created")
+});
+pub static COMPACT_PENDING_JOBS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "compact_pending_jobs",
+            "Compactor pending jobs count. Please include 'organization and 'stream type' labels for this metric.".to_owned(),
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["organization", "stream_type"],
     )
     .expect("Metric created")
 });
@@ -564,6 +643,91 @@ pub static MEMORY_USAGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("Metric created")
 });
 
+// metrics for query manager
+pub static QUERY_RUNNING_NUMS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new("query_running_nums", "Running query numbers")
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["organization"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_PENDING_NUMS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new("query_pending_nums", "Pending query numbers")
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["organization"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_TIMEOUT_NUMS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new("query_timeout_nums", "Timeout query numbers")
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["organization"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_CANCELED_NUMS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new("query_canceled_nums", "Cancel query numbers")
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["organization"],
+    )
+    .expect("Metric created")
+});
+
+// This corresponds to mysql or pgsql queries, not sqlite as that is local and can be ignored
+pub static DB_QUERY_NUMS: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new("db_query_nums", "db query number")
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["operation", "table"],
+    )
+    .expect("Metric created")
+});
+
+pub static DB_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new("db_query_time", "db query time. ".to_owned())
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+        &["operation", "table"],
+    )
+    .expect("Metric created")
+});
+
+pub static FILE_LIST_ID_SELECT_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "file_list_id_select_count",
+            "total number of ids returned by file list query",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+
+pub static FILE_LIST_CACHE_HIT_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "file_list_cache_hit_count",
+            "number of ids returned from file list cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+
 fn register_metrics(registry: &Registry) {
     // http latency
     registry
@@ -587,6 +751,9 @@ fn register_metrics(registry: &Registry) {
         .expect("Metric registered");
     registry
         .register(Box::new(INGEST_BYTES.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(INGEST_ERRORS.clone()))
         .expect("Metric registered");
     registry
         .register(Box::new(INGEST_WAL_USED_BYTES.clone()))
@@ -632,6 +799,32 @@ fn register_metrics(registry: &Registry) {
     registry
         .register(Box::new(QUERY_DISK_CACHE_FILES.clone()))
         .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_DISK_RESULT_CACHE_USED_BYTES.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_DISK_METRICS_CACHE_USED_BYTES.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_METRICS_CACHE_REQUESTS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_METRICS_CACHE_HITS.clone()))
+        .expect("Metric registered");
+
+    // query manager
+    registry
+        .register(Box::new(QUERY_RUNNING_NUMS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_PENDING_NUMS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_TIMEOUT_NUMS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_CANCELED_NUMS.clone()))
+        .expect("Metric registered");
 
     // compactor stats
     registry
@@ -645,6 +838,9 @@ fn register_metrics(registry: &Registry) {
         .expect("Metric registered");
     registry
         .register(Box::new(COMPACT_DELAY_HOURS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(COMPACT_PENDING_JOBS.clone()))
         .expect("Metric registered");
 
     // storage stats
@@ -709,6 +905,22 @@ fn register_metrics(registry: &Registry) {
     registry
         .register(Box::new(MEMORY_USAGE.clone()))
         .expect("Metric registered");
+
+    // db stats
+    registry
+        .register(Box::new(DB_QUERY_NUMS.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(DB_QUERY_TIME.clone()))
+        .expect("Metric registered");
+
+    // file list specific metrics
+    registry
+        .register(Box::new(FILE_LIST_ID_SELECT_COUNT.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(FILE_LIST_CACHE_HIT_COUNT.clone()))
+        .expect("Metric registered");
 }
 
 fn create_const_labels() -> HashMap<String, String> {
@@ -721,13 +933,16 @@ fn create_const_labels() -> HashMap<String, String> {
 }
 
 pub fn create_prometheus_handler() -> PrometheusMetrics {
-    let registry = prometheus::Registry::new();
-    register_metrics(&registry);
-
     PrometheusMetricsBuilder::new(NAMESPACE)
         .endpoint(format!("{}/metrics", crate::config::get_config().common.base_uri).as_str())
         .const_labels(create_const_labels())
-        .registry(registry)
+        .registry(get_registry())
         .build()
         .expect("Prometheus build failed")
+}
+
+pub fn get_registry() -> Registry {
+    let registry = prometheus::Registry::new();
+    register_metrics(&registry);
+    registry
 }

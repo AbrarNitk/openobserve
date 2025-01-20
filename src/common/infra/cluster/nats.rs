@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,11 +14,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::cmp::min;
+use std::sync::atomic::Ordering;
 
 use config::{
     cluster::*,
     get_config,
-    meta::cluster::{Node, NodeStatus, Role},
+    meta::cluster::{Node, NodeStatus, Role, RoleGroup},
     utils::json,
 };
 use infra::{
@@ -26,10 +27,10 @@ use infra::{
     dist_lock,
     errors::{Error, Result},
 };
-use tokio::{task, time};
+use tokio::task;
 
-/// Register and keepalive the node to cluster
-pub(crate) async fn register_and_keepalive() -> Result<()> {
+/// Register and keep alive the node to cluster
+pub(crate) async fn register_and_keep_alive() -> Result<()> {
     if let Err(e) = register().await {
         log::error!("[CLUSTER] register failed: {}", e);
         return Err(e);
@@ -39,16 +40,15 @@ pub(crate) async fn register_and_keepalive() -> Result<()> {
     task::spawn(async move {
         // check if the node is already online
         loop {
-            time::sleep(time::Duration::from_secs(1)).await;
-            let status = unsafe { LOCAL_NODE_STATUS.clone() };
-            if status == NodeStatus::Online {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if is_online() {
                 break;
             }
         }
-        // after the node is online, keepalive
+        // after the node is online, keep alive
         let ttl_keep_alive = min(10, (get_config().limit.node_heartbeat_ttl / 2) as u64);
         loop {
-            time::sleep(time::Duration::from_secs(ttl_keep_alive)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(ttl_keep_alive)).await;
             loop {
                 if is_offline() {
                     break;
@@ -58,8 +58,8 @@ pub(crate) async fn register_and_keepalive() -> Result<()> {
                         break;
                     }
                     Err(e) => {
-                        log::error!("[CLUSTER] keepalive failed: {}", e);
-                        time::sleep(time::Duration::from_secs(1)).await;
+                        log::error!("[CLUSTER] keep alive failed: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         continue;
                     }
                 }
@@ -92,14 +92,19 @@ async fn register() -> Result<()> {
     let mut node_ids = Vec::new();
     let mut w = super::NODES.write().await;
     for node in node_list {
-        if is_querier(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::Querier).await;
+        if node.is_interactive_querier() {
+            super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Interactive))
+                .await;
         }
-        if is_compactor(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::Compactor).await;
+        if node.is_background_querier() {
+            super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Background))
+                .await;
         }
-        if is_flatten_compactor(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor).await;
+        if node.is_compactor() {
+            super::add_node_to_consistent_hash(&node, &Role::Compactor, None).await;
+        }
+        if node.is_flatten_compactor() {
+            super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor, None).await;
         }
         node_ids.push(node.id);
         w.insert(node.uuid.clone(), node);
@@ -125,14 +130,25 @@ async fn register() -> Result<()> {
     }
 
     // 5. join the cluster
-    let key = format!("/nodes/{}", *LOCAL_NODE_UUID);
+    let key = format!("/nodes/{}", LOCAL_NODE.uuid);
     let node = Node {
         id: new_node_id,
-        uuid: LOCAL_NODE_UUID.clone(),
+        uuid: LOCAL_NODE.uuid.clone(),
         name: cfg.common.instance_name.clone(),
-        http_addr: format!("http://{}:{}", get_local_http_ip(), cfg.http.port),
-        grpc_addr: format!("http://{}:{}", get_local_grpc_ip(), cfg.grpc.port),
-        role: LOCAL_NODE_ROLE.clone(),
+        http_addr: format!(
+            "{}://{}:{}",
+            get_http_schema(),
+            get_local_http_ip(),
+            cfg.http.port
+        ),
+        grpc_addr: format!(
+            "{}://{}:{}",
+            get_grpc_schema(),
+            get_local_grpc_ip(),
+            cfg.grpc.port
+        ),
+        role: LOCAL_NODE.role.clone(),
+        role_group: LOCAL_NODE.role_group,
         cpu_num: cfg.limit.cpu_num as u64,
         status: NodeStatus::Prepare,
         scheduled: true,
@@ -141,18 +157,23 @@ async fn register() -> Result<()> {
     let val = json::to_vec(&node).unwrap();
 
     // cache local node
-    if is_querier(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::Querier).await;
+    if node.is_interactive_querier() {
+        super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Interactive))
+            .await;
     }
-    if is_compactor(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::Compactor).await;
+    if node.is_background_querier() {
+        super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Background))
+            .await;
     }
-    if is_flatten_compactor(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor).await;
+    if node.is_compactor() {
+        super::add_node_to_consistent_hash(&node, &Role::Compactor, None).await;
+    }
+    if node.is_flatten_compactor() {
+        super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor, None).await;
     }
 
     let mut w = super::NODES.write().await;
-    w.insert(LOCAL_NODE_UUID.clone(), node);
+    w.insert(LOCAL_NODE.uuid.clone(), node);
     drop(w);
 
     // 6. register node to cluster
@@ -181,7 +202,7 @@ pub(crate) async fn set_offline() -> Result<()> {
 pub(crate) async fn set_status(status: NodeStatus) -> Result<()> {
     let cfg = get_config();
     // set node status to online
-    let node = match super::NODES.read().await.get(LOCAL_NODE_UUID.as_str()) {
+    let node = match super::NODES.read().await.get(LOCAL_NODE.uuid.as_str()) {
         Some(node) => {
             let mut val = node.clone();
             val.status = status.clone();
@@ -189,11 +210,22 @@ pub(crate) async fn set_status(status: NodeStatus) -> Result<()> {
         }
         None => Node {
             id: unsafe { LOCAL_NODE_ID },
-            uuid: LOCAL_NODE_UUID.clone(),
+            uuid: LOCAL_NODE.uuid.clone(),
             name: cfg.common.instance_name.clone(),
-            http_addr: format!("http://{}:{}", get_local_node_ip(), cfg.http.port),
-            grpc_addr: format!("http://{}:{}", get_local_node_ip(), cfg.grpc.port),
-            role: LOCAL_NODE_ROLE.clone(),
+            http_addr: format!(
+                "{}://{}:{}",
+                get_http_schema(),
+                get_local_http_ip(),
+                cfg.http.port
+            ),
+            grpc_addr: format!(
+                "{}://{}:{}",
+                get_grpc_schema(),
+                get_local_grpc_ip(),
+                cfg.grpc.port
+            ),
+            role: LOCAL_NODE.role.clone(),
+            role_group: LOCAL_NODE.role_group,
             cpu_num: cfg.limit.cpu_num as u64,
             status: status.clone(),
             scheduled: true,
@@ -202,11 +234,9 @@ pub(crate) async fn set_status(status: NodeStatus) -> Result<()> {
     };
     let val = json::to_string(&node).unwrap();
 
-    unsafe {
-        LOCAL_NODE_STATUS = status;
-    }
+    LOCAL_NODE_STATUS.store(status as _, Ordering::Release);
 
-    let key = format!("/nodes/{}", *LOCAL_NODE_UUID);
+    let key = format!("/nodes/{}", LOCAL_NODE.uuid);
     let client = get_coordinator().await;
     if let Err(e) = client.put(&key, val.into(), NEED_WATCH, None).await {
         return Err(Error::Message(format!("online node error: {}", e)));
@@ -217,7 +247,7 @@ pub(crate) async fn set_status(status: NodeStatus) -> Result<()> {
 
 /// Leave cluster
 pub(crate) async fn leave() -> Result<()> {
-    let key = format!("/nodes/{}", *LOCAL_NODE_UUID);
+    let key = format!("/nodes/{}", LOCAL_NODE.uuid);
     let client = get_coordinator().await;
     if let Err(e) = client.delete(&key, false, NEED_WATCH, None).await {
         return Err(Error::Message(format!("leave node error: {}", e)));
@@ -227,7 +257,7 @@ pub(crate) async fn leave() -> Result<()> {
 }
 
 pub(crate) async fn update_local_node(node: &Node) -> Result<()> {
-    let key = format!("/nodes/{}", *LOCAL_NODE_UUID);
+    let key = format!("/nodes/{}", LOCAL_NODE.uuid);
     let val = json::to_vec(&node).unwrap();
     let client = get_coordinator().await;
     if let Err(e) = client.put(&key, val.into(), NEED_WATCH, None).await {

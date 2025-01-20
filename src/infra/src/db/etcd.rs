@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -52,7 +52,7 @@ pub async fn init() {
         return;
     }
     // enable keep alive for auth token
-    tokio::task::spawn(async move { keepalive_connection().await });
+    tokio::task::spawn(async move { keep_alive_connection().await });
 }
 
 pub struct Etcd {
@@ -61,7 +61,7 @@ pub struct Etcd {
 
 impl Etcd {
     pub fn new(prefix: &str) -> Etcd {
-        let prefix = prefix.trim_end_matches(|v| v == '/');
+        let prefix = prefix.trim_end_matches('/');
         Etcd {
             prefix: prefix.to_string(),
         }
@@ -433,7 +433,8 @@ impl super::Db for Etcd {
     }
 
     async fn watch(&self, prefix: &str) -> Result<Arc<mpsc::Receiver<Event>>> {
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(65535);
+        let prefix = prefix.to_string();
         let key = format!("{}{}", &self.prefix, prefix);
         let self_prefix = self.prefix.to_string();
         let _task: JoinHandle<Result<()>> = tokio::task::spawn(async move {
@@ -443,12 +444,13 @@ impl super::Db for Etcd {
                 }
                 let mut client = get_etcd_client().await.clone();
                 let opt = etcd_client::WatchOptions::new().with_prefix();
+                log::debug!("[ETCD:watch] prefix: {}", prefix);
                 let (mut _watcher, mut stream) =
                     match client.watch(key.clone(), Some(opt.clone())).await {
                         Ok((watcher, stream)) => (watcher, stream),
                         Err(e) => {
-                            log::error!("watching prefix: {}, error: {}", key, e);
-                            time::sleep(time::Duration::from_secs(1)).await;
+                            log::error!("[ETCD:watch] prefix: {}, error: {}", key, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                             continue;
                         }
                     };
@@ -456,7 +458,7 @@ impl super::Db for Etcd {
                     let resp = match stream.message().await {
                         Ok(resp) => resp,
                         Err(e) => {
-                            log::error!("watching prefix: {}, get message error: {}", key, e);
+                            log::error!("[ETCD:watch] prefix: {}, get message error: {}", key, e);
                             break;
                         }
                     };
@@ -465,23 +467,25 @@ impl super::Db for Etcd {
                             let kv = ev.kv().unwrap();
                             let item_key = kv.key_str().unwrap();
                             let item_key = item_key.strip_prefix(&self_prefix).unwrap();
-                            match ev.event_type() {
-                                EventType::Put => tx
-                                    .send(Event::Put(EventData {
-                                        key: item_key.to_string(),
-                                        value: Some(Bytes::from(kv.value().to_vec())),
-                                        start_dt: None,
-                                    }))
-                                    .await
-                                    .unwrap(),
-                                EventType::Delete => tx
-                                    .send(Event::Delete(EventData {
-                                        key: item_key.to_string(),
-                                        value: None,
-                                        start_dt: None,
-                                    }))
-                                    .await
-                                    .unwrap(),
+                            let ret = match ev.event_type() {
+                                EventType::Put => tx.try_send(Event::Put(EventData {
+                                    key: item_key.to_string(),
+                                    value: Some(Bytes::from(kv.value().to_vec())),
+                                    start_dt: None,
+                                })),
+                                EventType::Delete => tx.try_send(Event::Delete(EventData {
+                                    key: item_key.to_string(),
+                                    value: None,
+                                    start_dt: None,
+                                })),
+                            };
+                            if let Err(e) = ret {
+                                log::warn!(
+                                    "[ETCD:watch] prefix: {}, key: {}, send error: {}",
+                                    prefix,
+                                    item_key,
+                                    e
+                                );
                             }
                         }
                     }
@@ -534,7 +538,7 @@ pub async fn connect() -> etcd_client::Client {
         .expect("Etcd connect failed")
 }
 
-pub async fn keepalive_connection() -> Result<()> {
+pub async fn keep_alive_connection() -> Result<()> {
     loop {
         if cluster::is_offline() {
             break;
@@ -560,7 +564,7 @@ pub async fn keepalive_connection() -> Result<()> {
     Ok(())
 }
 
-pub async fn keepalive_lease_id<F>(id: i64, ttl: i64, stopper: F) -> Result<()>
+pub async fn keep_alive_lease_id<F>(id: i64, ttl: i64, stopper: F) -> Result<()>
 where
     F: Fn() -> bool,
 {
@@ -574,7 +578,7 @@ where
             Ok((keeper, stream)) => (keeper, stream),
             Err(e) => {
                 log::error!("lease {:?} keep alive error: {:?}", id, e);
-                time::sleep(time::Duration::from_secs(1)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -582,7 +586,7 @@ where
             if stopper() {
                 break;
             }
-            time::sleep(time::Duration::from_secs(ttl_keep_alive)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(ttl_keep_alive)).await;
             match keeper.keep_alive().await {
                 Ok(_) => {}
                 Err(e) => {
@@ -614,7 +618,7 @@ where
 }
 
 pub(crate) struct Locker {
-    key: String,
+    pub key: String,
     lock_id: String,
     state: Arc<AtomicU8>, // 0: init, 1: locking, 2: release
 }

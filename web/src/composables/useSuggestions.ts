@@ -101,20 +101,24 @@ const defaultSuggestions = [
     insertText: (_keyword: string) => `match_all('${_keyword}')`,
   },
   {
-    label: (_keyword: string) => `match_all_ignore_case('${_keyword}')`,
+    label: (_keyword: string) => `match_all_raw('${_keyword}')`,
     kind: "Text",
-    insertText: (_keyword: string) => `match_all_ignore_case('${_keyword}')`,
+    insertText: (_keyword: string) => `match_all_raw('${_keyword}')`,
   },
   {
-    label: (_keyword: string) => `match_all_indexed('${_keyword}')`,
+    label: (_keyword: string) => `match_all_raw_ignore_case('${_keyword}')`,
     kind: "Text",
-    insertText: (_keyword: string) => `match_all_indexed('${_keyword}')`,
+    insertText: (_keyword: string) => `match_all_raw_ignore_case('${_keyword}')`,
   },
   {
-    label: (_keyword: string) => `match_all_indexed_ignore_case('${_keyword}')`,
+    label: (_keyword: string) => `re_match(fieldname: string, regular_expression: string)`,
     kind: "Text",
-    insertText: (_keyword: string) =>
-      `match_all_indexed_ignore_case('${_keyword}')`,
+    insertText: (_keyword: string) => `re_match(fieldname, '')`,
+  },
+  {
+    label: (_keyword: string) => `re_not_match(fieldname: string, regular_expression: string)`,
+    kind: "Text",
+    insertText: (_keyword: string) => `re_not_match(fieldname, '')`,
   },
   {
     label: (_keyword: string) => `str_match(fieldname, '${_keyword}')`,
@@ -127,6 +131,16 @@ const defaultSuggestions = [
     kind: "Text",
     insertText: (_keyword: string) =>
       `str_match_ignore_case(fieldname, '${_keyword}')`,
+  },
+  {
+    label: (_keyword: string) => `fuzzy_match(fieldname, '${_keyword}', 1)`,
+    kind: "Text",
+    insertText: (_keyword: string) => `fuzzy_match(fieldname, '${_keyword}', 1)`,
+  },
+  {
+    label: (_keyword: string) => `fuzzy_match_all('${_keyword}', 1)`,
+    kind: "Text",
+    insertText: (_keyword: string) => `fuzzy_match_all('${_keyword}', 1)`,
   },
 ];
 

@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -20,6 +20,7 @@ import { Dialog, Notify } from "quasar";
 import AlertList from "@/components/alerts/AlertList.vue";
 import i18n from "@/locales";
 import store from "../../helpers/store";
+// @ts-ignore
 import { rest } from "msw";
 import AlertService from "@/services/alerts";
 import router from "../../helpers/router";
@@ -124,7 +125,7 @@ describe("Alert List", async () => {
       global.server.use(
         rest.delete(
           `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/${stream_name}/alerts/${alert_name}`,
-          (req, res, ctx) => {
+          (req: any, res: any, ctx: any) => {
             return res(ctx.status(200), ctx.json({ code: 200 }));
           }
         )
@@ -132,7 +133,7 @@ describe("Alert List", async () => {
       global.server.use(
         rest.get(
           `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/alerts`,
-          (req, res, ctx) => {
+          (req: any, res: any, ctx: any) => {
             return res(
               ctx.status(200),
               ctx.json({

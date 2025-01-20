@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -23,6 +23,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           :class="selectedButtonType === 'auto' ? 'selected' : ''"
           class="button button-left"
           @click="onUpdateButton('auto', $event)"
+          :style="{
+            backgroundColor:
+            store.state.theme == 'dark' ? '#bfbebef5' : '#f0eaea',
+          }"
         >
           {{ t("panel.auto") }}
         </button>
@@ -31,6 +35,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <button
           data-test="dashboard-promQL"
           class="button"
+          :style="{
+            backgroundColor:
+            store.state.theme == 'dark' ? '#bfbebef5' : '#f0eaea',
+          }"
           :class="selectedButtonType === 'promql' ? 'selected' : ''"
           v-show="
             dashboardPanelData.data.queries[
@@ -46,6 +54,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <button
           data-test="dashboard-customSql"
           :class="selectedButtonType === 'custom-sql' ? 'selected' : ''"
+          :style="{
+            backgroundColor:
+            store.state.theme == 'dark' ? '#bfbebef5' : '#f0eaea',
+          }"
           class="button button-right"
           @click="onUpdateButton('custom-sql', $event)"
         >
@@ -71,12 +83,14 @@ import {
   onActivated,
   onMounted,
   nextTick,
+  inject,
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useQuasar } from "quasar";
 import useDashboardPanelData from "../../../composables/useDashboardPanel";
 import ConfirmDialog from "../../ConfirmDialog.vue";
+import { useStore } from "vuex";
 
 export default defineComponent({
   name: "QueryTypeSelector",
@@ -87,11 +101,16 @@ export default defineComponent({
     const router = useRouter();
     const { t } = useI18n();
     const $q = useQuasar();
+    const store = useStore();
+    const dashboardPanelDataPageKey = inject(
+      "dashboardPanelDataPageKey",
+      "dashboard"
+    );
     const {
       dashboardPanelData,
       removeXYFilters,
       updateXYFieldsForCustomQueryMode,
-    } = useDashboardPanelData();
+    } = useDashboardPanelData(dashboardPanelDataPageKey);
     const confirmQueryModeChangeDialog = ref(false);
 
     // this is the value of the current button
@@ -195,6 +214,10 @@ export default defineComponent({
       await nextTick(); // let the watchers execute first
       removeXYFilters();
       updateXYFieldsForCustomQueryMode();
+
+      // empty the errors
+      dashboardPanelData.meta.errors.queryErrors = [];
+
       if (selectedButtonType.value == "promql") {
         dashboardPanelData.layout.currentQueryIndex = 0;
         dashboardPanelData.data.queries = dashboardPanelData.data.queries.slice(
@@ -263,6 +286,7 @@ export default defineComponent({
       changeToggle,
       confirmQueryModeChangeDialog,
       selectedButtonType,
+      store,
     };
   },
   components: { ConfirmDialog },
@@ -284,7 +308,7 @@ export default defineComponent({
 .button {
   display: block;
   cursor: pointer;
-  background-color: #f0eaea;
+  // background-color: #f0eaea;
   border: none;
   font-size: 14px;
   padding: 3px 10px;

@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -269,9 +269,9 @@ export default defineComponent({
       () => store.state.theme,
       () => {
         monaco.editor.setTheme(
-          store.state.theme == "dark" ? "vs-dark" : "myCustomTheme"
+          store.state.theme == "dark" ? "vs-dark" : "myCustomTheme",
         );
-      }
+      },
     );
 
     onMounted(async () => {
@@ -291,10 +291,12 @@ export default defineComponent({
         },
       });
 
+      // Dispose the provider if it already exists before registering a new one
+      provider.value?.dispose();
       registerAutoCompleteProvider();
 
       editorObj = monaco.editor.create(editorRef.value, {
-        value: props.query,
+        value: props.query?.trim(),
         language: "sql",
         theme: store.state.theme == "dark" ? "vs-dark" : "myCustomTheme",
         showFoldingControls: "never",
@@ -322,8 +324,12 @@ export default defineComponent({
       });
 
       editorObj.onDidChangeModelContent((e: any) => {
-        emit("update-query", e, editorObj.getValue());
-        emit("update:query", editorObj.getValue());
+        emit("update-query", e, editorObj.getValue()?.trim());
+        emit("update:query", editorObj.getValue()?.trim());
+      });
+
+      editorObj.onDidBlurEditorWidget(() => {
+        setValue(editorObj.getValue()?.trim());
       });
 
       editorObj.createContextKey("ctrlenter", true);
@@ -334,7 +340,7 @@ export default defineComponent({
             emit("run-query");
           }, 300);
         },
-        "ctrlenter"
+        "ctrlenter",
       );
     });
 
@@ -399,21 +405,27 @@ export default defineComponent({
               range: range,
             });
             filteredSuggestions.push({
-              label: `match_all_ignore_case('${lastElement}')`,
+              label: `match_all_raw('${lastElement}')`,
               kind: monaco.languages.CompletionItemKind.Text,
-              insertText: `match_all_ignore_case('${lastElement}')`,
+              insertText: `match_all_raw('${lastElement}')`,
               range: range,
             });
             filteredSuggestions.push({
-              label: `match_all_indexed('${lastElement}')`,
+              label: `match_all_raw_ignore_case('${lastElement}')`,
               kind: monaco.languages.CompletionItemKind.Text,
-              insertText: `match_all_indexed('${lastElement}')`,
+              insertText: `match_all_raw_ignore_case('${lastElement}')`,
               range: range,
             });
             filteredSuggestions.push({
-              label: `match_all_indexed_ignore_case('${lastElement}')`,
+              label: `re_match(fieldname: string, regular_expression: string)`,
               kind: monaco.languages.CompletionItemKind.Text,
-              insertText: `match_all_indexed_ignore_case('${lastElement}')`,
+              insertText: `re_match(fieldname, '')`,
+              range: range,
+            });
+            filteredSuggestions.push({
+              label: `re_not_match(fieldname: string, regular_expression: string)`,
+              kind: monaco.languages.CompletionItemKind.Text,
+              insertText: `re_not_match(fieldname, '')`,
               range: range,
             });
             filteredSuggestions.push({
@@ -426,6 +438,18 @@ export default defineComponent({
               label: `str_match(fieldname, '${lastElement}')`,
               kind: monaco.languages.CompletionItemKind.Text,
               insertText: `str_match(fieldname, '${lastElement}')`,
+              range: range,
+            });
+            filteredSuggestions.push({
+              label: `fuzzy_match(fieldname, '${lastElement}', 1)`,
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: `fuzzy_match(fieldname, '${lastElement}', 1)`,
+              range: range,
+            });
+            filteredSuggestions.push({
+              label: `fuzzy_match_all('${lastElement}', 1)`,
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: `fuzzy_match_all('${lastElement}', 1)`,
               range: range,
             });
           } else {
@@ -457,7 +481,7 @@ export default defineComponent({
       () => props.readOnly,
       () => {
         editorObj.updateOptions({ readOnly: props.readOnly });
-      }
+      },
     );
 
     // update readonly when prop value changes
@@ -467,7 +491,7 @@ export default defineComponent({
         if (props.readOnly || !editorObj.hasWidgetFocus()) {
           editorObj.getModel().setValue(props.query);
         }
-      }
+      },
     );
 
     const resetEditorLayout = () => {

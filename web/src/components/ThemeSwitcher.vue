@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,8 +15,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-btn class="round-button" round flat @click="toggleDarkMode">
-    <q-icon :name="DarkModeIcon"></q-icon>
+  <q-btn class="round-button" round flat dense :ripple="false" @click="toggleDarkMode">
+    <q-icon :name="DarkModeIcon" size="25px" class="header-icon"></q-icon>
+    <q-tooltip anchor="top middle" self="bottom middle">
+      Switch to {{ darkMode ? "Light Mode" : "Dark Mode" }}
+    </q-tooltip>
   </q-btn>
 </template>
 

@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -46,7 +46,9 @@ const alerts = {
     data: any
   ) => {
     return http().put(
-      `/api/${org_identifier}/${stream_name}/alerts/${data.name}?type=${stream_type}`,
+      `/api/${org_identifier}/${stream_name}/alerts/${encodeURIComponent(
+        data.name
+      )}?type=${stream_type}`,
       data
     );
   },
@@ -56,7 +58,9 @@ const alerts = {
     alert_name: string
   ) => {
     return http().get(
-      `/api/${org_identifier}/${stream_name}/alerts/${alert_name}`
+      `/api/${org_identifier}/${stream_name}/alerts/${encodeURIComponent(
+        alert_name
+      )}`
     );
   },
   delete: (
@@ -65,7 +69,9 @@ const alerts = {
     alert_name: string,
     type: string
   ) => {
-    let url = `/api/${org_identifier}/${stream_name}/alerts/${alert_name}`;
+    let url = `/api/${org_identifier}/${stream_name}/alerts/${encodeURIComponent(
+      alert_name
+    )}`;
     if (type != "") {
       url += "?type=" + type;
     }
@@ -78,7 +84,9 @@ const alerts = {
     enable: boolean,
     stream_type: string
   ) => {
-    const url = `/api/${org_identifier}/${stream_name}/alerts/${alert_name}/enable?value=${enable}&type=${stream_type}`;
+    const url = `/api/${org_identifier}/${stream_name}/alerts/${encodeURIComponent(
+      alert_name
+    )}/enable?value=${enable}&type=${stream_type}`;
     return http().put(url);
   },
 
@@ -88,7 +96,9 @@ const alerts = {
     alert_name: string,
     stream_type: string
   ) => {
-    const url = `/api/${org_identifier}/${stream_name}/alerts/${alert_name}/preview?type=${stream_type}`;
+    const url = `/api/${org_identifier}/${stream_name}/alerts/${encodeURIComponent(
+      alert_name
+    )}/preview?type=${stream_type}`;
     return http().get(url);
   },
 };

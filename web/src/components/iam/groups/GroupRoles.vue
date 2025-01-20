@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -101,7 +101,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             method: filterRoles,
           }"
         >
-          <template v-slot:select="slotProps">
+          <template v-slot:select="slotProps: any">
             <q-checkbox
               :data-test="`iam-roles-selection-table-body-row-${slotProps.column.row.role_name}-checkbox`"
               size="xs"

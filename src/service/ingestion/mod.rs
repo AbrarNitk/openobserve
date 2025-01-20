@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,37 +21,43 @@ use std::{
 use anyhow::{anyhow, Result};
 use chrono::{Duration, TimeZone, Utc};
 use config::{
-    cluster, get_config,
+    cluster::{LOCAL_NODE, LOCAL_NODE_ID},
+    get_config,
+    ider::SnowflakeIdGenerator,
     meta::{
-        stream::{PartitionTimeLevel, PartitioningDetails, Routing, StreamPartition, StreamType},
-        usage::{RequestStats, TriggerData, TriggerDataStatus, TriggerDataType},
+        alerts::alert::Alert,
+        function::{VRLResultResolver, VRLRuntimeConfig},
+        self_reporting::usage::{RequestStats, TriggerData, TriggerDataStatus, TriggerDataType},
+        stream::{
+            PartitionTimeLevel, PartitioningDetails, StreamParams, StreamPartition, StreamType,
+        },
     },
-    utils::{flatten, json::*},
+    metrics,
+    utils::{flatten, json::*, schema::format_partition_key},
     SIZE_IN_MB,
 };
-use vector_enrichment::TableRegistry;
+use infra::schema::STREAM_RECORD_ID_GENERATOR;
+use proto::cluster_rpc::IngestionType;
 use vrl::{
     compiler::{runtime::Runtime, CompilationResult, TargetValueRef},
     prelude::state,
 };
 
-use super::usage::publish_triggers_usage;
+use super::{
+    db::pipeline, pipeline::batch_execution::ExecutablePipeline,
+    self_reporting::publish_triggers_usage,
+};
 use crate::{
     common::{
-        infra::config::{
-            REALTIME_ALERT_TRIGGERS, STREAM_ALERTS, STREAM_FUNCTIONS, STREAM_PIPELINES,
-        },
-        meta::{
-            alerts::Alert,
-            functions::{StreamTransform, VRLResultResolver, VRLRuntimeConfig},
-            stream::{SchemaRecords, StreamParams},
-        },
+        infra::config::{REALTIME_ALERT_TRIGGERS, STREAM_ALERTS},
+        meta::{ingestion::IngestionRequest, stream::SchemaRecords},
         utils::functions::get_vrl_compiler_config,
     },
-    service::{db, format_partition_key},
+    service::{alerts::alert::AlertExt, db, logs::bulk::TRANSFORM_FAILED},
 };
 
 pub mod grpc;
+pub mod ingestion_service;
 
 pub type TriggerAlertData = Vec<(Alert, Vec<Map<String, Value>>)>;
 
@@ -90,13 +96,13 @@ pub fn compile_vrl_function(func: &str, org_id: &str) -> Result<VRLRuntimeConfig
 pub fn apply_vrl_fn(
     runtime: &mut Runtime,
     vrl_runtime: &VRLResultResolver,
-    row: &Value,
+    row: Value,
     org_id: &str,
-    stream_name: &str,
-) -> Value {
+    stream_name: &[String],
+) -> (Value, Option<String>) {
     let mut metadata = vrl::value::Value::from(BTreeMap::new());
     let mut target = TargetValueRef {
-        value: &mut vrl::value::Value::from(row),
+        value: &mut vrl::value::Value::from(&row),
         metadata: &mut metadata,
         secrets: &mut vrl::value::Secrets::new(),
     };
@@ -108,53 +114,40 @@ pub fn apply_vrl_fn(
     };
     match result {
         Ok(res) => match res.try_into() {
-            Ok(val) => val,
+            Ok(val) => (val, None),
             Err(err) => {
-                log::error!(
-                    "{}/{} vrl failed at processing result {:?}. Returning original row.",
-                    org_id,
-                    stream_name,
-                    err,
+                metrics::INGEST_ERRORS
+                    .with_label_values(&[
+                        org_id,
+                        StreamType::Logs.to_string().as_str(),
+                        &format!("{:?}", stream_name),
+                        TRANSFORM_FAILED,
+                    ])
+                    .inc();
+                let err_msg = format!(
+                    "{}/{:?} vrl failed at processing result {:?} on record {:?}. Returning original row.",
+                    org_id, stream_name, err, row
                 );
-                row.clone()
+                log::warn!("{err_msg}");
+                (row, Some(err_msg))
             }
         },
         Err(err) => {
-            log::error!(
-                "{}/{} vrl runtime failed at getting result {:?}. Returning original row.",
-                org_id,
-                stream_name,
-                err,
+            metrics::INGEST_ERRORS
+                .with_label_values(&[
+                    org_id,
+                    StreamType::Logs.to_string().as_str(),
+                    &format!("{:?}", stream_name),
+                    TRANSFORM_FAILED,
+                ])
+                .inc();
+            let err_msg = format!(
+                "{}/{:?} vrl runtime failed at getting result {:?} on record {:?}. Returning original row.",
+                org_id, stream_name, err, row
             );
-            row.clone()
+            log::warn!("{err_msg}");
+            (row, Some(err_msg))
         }
-    }
-}
-
-pub async fn get_stream_functions<'a>(
-    streams: &[StreamParams],
-    stream_functions_map: &mut HashMap<String, Vec<StreamTransform>>,
-    stream_vrl_map: &mut HashMap<String, VRLResultResolver>,
-) {
-    for stream in streams {
-        let key = format!(
-            "{}/{}/{}",
-            stream.org_id, stream.stream_type, stream.stream_name
-        );
-        if stream_functions_map.contains_key(&key) {
-            return;
-        }
-        //   let mut _local_trans: Vec<StreamTransform> = vec![];
-        // let local_stream_vrl_map;
-        let (_local_trans, local_stream_vrl_map) =
-            crate::service::ingestion::register_stream_functions(
-                &stream.org_id,
-                &stream.stream_type,
-                &stream.stream_name,
-            );
-        stream_vrl_map.extend(local_stream_vrl_map);
-
-        stream_functions_map.insert(key, _local_trans);
     }
 }
 
@@ -170,6 +163,15 @@ pub async fn get_stream_partition_keys(
         partition_keys: stream_settings.partition_keys,
         partition_time_level: stream_settings.partition_time_level,
     }
+}
+
+pub async fn get_stream_executable_pipeline(
+    org_id: &str,
+    stream_name: &str,
+    stream_type: &StreamType,
+) -> Option<ExecutablePipeline> {
+    let stream_params = StreamParams::new(org_id, stream_name, *stream_type);
+    pipeline::get_executable_pipeline(&stream_params).await
 }
 
 pub async fn get_stream_alerts(
@@ -204,24 +206,27 @@ pub async fn get_stream_alerts(
             })
             .cloned()
             .collect::<Vec<_>>();
-
+        if alerts.is_empty() {
+            return;
+        }
         stream_alerts_map.insert(key, alerts);
     }
 }
 
-pub async fn evaluate_trigger(trigger: Option<TriggerAlertData>) {
-    if trigger.is_none() {
+pub async fn evaluate_trigger(triggers: TriggerAlertData) {
+    if triggers.is_empty() {
         return;
     }
-    let trigger = trigger.unwrap();
+    log::debug!("Evaluating triggers: {:?}", triggers);
     let mut trigger_usage_reports = vec![];
-    for (alert, val) in trigger.iter() {
+    for (alert, val) in triggers.iter() {
         let module_key = format!(
             "{}/{}/{}",
             &alert.stream_type, &alert.stream_name, &alert.name
         );
         let now = Utc::now().timestamp_micros();
         let mut trigger_data_stream = TriggerData {
+            _timestamp: now,
             org: alert.org_id.to_string(),
             module: TriggerDataType::Alert,
             key: module_key.clone(),
@@ -233,41 +238,59 @@ pub async fn evaluate_trigger(trigger: Option<TriggerAlertData>) {
             end_time: 0,
             retries: 0,
             error: None,
+            success_response: None,
+            is_partial: None,
+            delay_in_secs: None,
+            evaluation_took_in_secs: None,
         };
-        if let Err(e) = alert.send_notification(val).await {
-            log::error!("Failed to send notification: {}", e);
-            trigger_data_stream.status = TriggerDataStatus::Failed;
-            trigger_data_stream.error = Some(format!("error sending notification for alert: {e}"));
-        } else if alert.trigger_condition.silence > 0 {
-            log::debug!(
-                "Realtime alert {}/{}/{}/{} triggered successfully, hence applying silence period",
-                &alert.org_id,
-                &alert.stream_type,
-                &alert.stream_name,
-                &alert.name
-            );
-
-            let next_run_at = Utc::now().timestamp_micros()
-                + Duration::try_minutes(alert.trigger_condition.silence)
-                    .unwrap()
-                    .num_microseconds()
-                    .unwrap();
-            // After the notification is sent successfully, we need to update
-            // the silence period of the trigger
-            if let Err(e) = db::scheduler::update_trigger(db::scheduler::Trigger {
-                org: alert.org_id.to_string(),
-                module: db::scheduler::TriggerModule::Alert,
-                module_key,
-                is_silenced: true,
-                is_realtime: true,
-                next_run_at,
-                ..Default::default()
-            })
-            .await
-            {
-                log::error!("Failed to update trigger: {}", e);
+        match alert.send_notification(val, now, None, now).await {
+            Err(e) => {
+                log::error!("Failed to send notification: {}", e);
+                trigger_data_stream.status = TriggerDataStatus::Failed;
+                trigger_data_stream.error =
+                    Some(format!("error sending notification for alert: {e}"));
             }
-            trigger_data_stream.next_run_at = next_run_at;
+            Ok((success_msg, error_msg)) => {
+                let success_msg = success_msg.trim().to_owned();
+                let error_msg = error_msg.trim().to_owned();
+                if !error_msg.is_empty() {
+                    trigger_data_stream.error = Some(error_msg);
+                }
+                if !success_msg.is_empty() {
+                    trigger_data_stream.success_response = Some(success_msg);
+                }
+                if alert.trigger_condition.silence > 0 {
+                    log::debug!(
+                        "Realtime alert {}/{}/{}/{} triggered successfully, hence applying silence period",
+                        &alert.org_id,
+                        &alert.stream_type,
+                        &alert.stream_name,
+                        &alert.name
+                    );
+
+                    let next_run_at = Utc::now().timestamp_micros()
+                        + Duration::try_minutes(alert.trigger_condition.silence)
+                            .unwrap()
+                            .num_microseconds()
+                            .unwrap();
+                    // After the notification is sent successfully, we need to update
+                    // the silence period of the trigger
+                    if let Err(e) = db::scheduler::update_trigger(db::scheduler::Trigger {
+                        org: alert.org_id.to_string(),
+                        module: db::scheduler::TriggerModule::Alert,
+                        module_key,
+                        is_silenced: true,
+                        is_realtime: true,
+                        next_run_at,
+                        ..Default::default()
+                    })
+                    .await
+                    {
+                        log::error!("Failed to update trigger: {}", e);
+                    }
+                    trigger_data_stream.next_run_at = next_run_at;
+                }
+            }
         }
         trigger_data_stream.end_time = Utc::now().timestamp_micros();
         // Let all the alerts send notifications first
@@ -279,7 +302,7 @@ pub async fn evaluate_trigger(trigger: Option<TriggerAlertData>) {
     }
 }
 
-pub fn get_wal_time_key(
+pub fn get_write_partition_key(
     timestamp: i64,
     partition_keys: &Vec<StreamPartition>,
     time_level: PartitionTimeLevel,
@@ -306,69 +329,14 @@ pub fn get_wal_time_key(
         if key.disabled {
             continue;
         }
-        match local_val.get(&key.field) {
-            Some(v) => {
-                let val = get_string_value(v);
-                let val = key.get_partition_key(&val);
-                time_key.push_str(&format!("/{}", format_partition_key(&val)));
-            }
-            None => continue,
+        let val = match local_val.get(&key.field) {
+            Some(v) => get_string_value(v),
+            None => "null".to_string(),
         };
+        let val = key.get_partition_key(&val);
+        time_key.push_str(&format!("/{}", format_partition_key(&val)));
     }
     time_key
-}
-
-pub fn register_stream_functions(
-    org_id: &str,
-    stream_type: &StreamType,
-    stream_name: &str,
-) -> (Vec<StreamTransform>, HashMap<String, VRLResultResolver>) {
-    let mut local_trans = vec![];
-    let mut stream_vrl_map: HashMap<String, VRLResultResolver> = HashMap::new();
-    let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
-
-    if let Some(transforms) = STREAM_FUNCTIONS.get(&key) {
-        local_trans = (*transforms.list).to_vec();
-        local_trans.sort_by(|a, b| a.order.cmp(&b.order));
-        for trans in &local_trans {
-            let func_key = format!("{}/{}", &stream_name, trans.transform.name);
-            if let Ok(vrl_runtime_config) = compile_vrl_function(&trans.transform.function, org_id)
-            {
-                let registry = vrl_runtime_config
-                    .config
-                    .get_custom::<TableRegistry>()
-                    .unwrap();
-                registry.finish_load();
-                stream_vrl_map.insert(
-                    func_key,
-                    VRLResultResolver {
-                        program: vrl_runtime_config.program,
-                        fields: vrl_runtime_config.fields,
-                    },
-                );
-            }
-        }
-    }
-
-    (local_trans, stream_vrl_map)
-}
-
-pub fn apply_stream_functions(
-    local_trans: &[StreamTransform],
-    mut value: Value,
-    stream_vrl_map: &HashMap<String, VRLResultResolver>,
-    org_id: &str,
-    stream_name: &str,
-    runtime: &mut Runtime,
-) -> Result<Value> {
-    for trans in local_trans {
-        let func_key = format!("{stream_name}/{}", trans.transform.name);
-        if stream_vrl_map.contains_key(&func_key) && !value.is_null() {
-            let vrl_runtime = stream_vrl_map.get(&func_key).unwrap();
-            value = apply_vrl_fn(runtime, vrl_runtime, &value, org_id, stream_name);
-        }
-    }
-    flatten::flatten_with_level(value, get_config().limit.ingest_flatten_level)
 }
 
 pub fn init_functions_runtime() -> Runtime {
@@ -379,40 +347,52 @@ pub async fn write_file(
     writer: &Arc<ingester::Writer>,
     stream_name: &str,
     buf: HashMap<String, SchemaRecords>,
+    fsync: bool,
 ) -> RequestStats {
     let mut req_stats = RequestStats::default();
-    for (hour_key, entry) in buf {
-        if entry.records.is_empty() {
-            continue;
-        }
-        let entry_records = entry.records.len();
-        if let Err(e) = writer
-            .write(
-                entry.schema,
-                ingester::Entry {
+    let entries = buf
+        .into_iter()
+        .filter_map(|(hour_key, entry)| {
+            if entry.records.is_empty() {
+                None
+            } else {
+                Some(ingester::Entry {
                     stream: Arc::from(stream_name),
+                    schema: Some(entry.schema),
                     schema_key: Arc::from(entry.schema_key.as_str()),
                     partition_key: Arc::from(hour_key.as_str()),
                     data: entry.records,
                     data_size: entry.records_size,
-                },
-                false,
-            )
-            .await
-        {
-            log::error!("ingestion write file error: {}", e);
-        }
-
-        req_stats.size += entry.records_size as f64 / SIZE_IN_MB;
-        req_stats.records += entry_records as i64;
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    let (entries_records, entries_size) = entries
+        .iter()
+        .map(|entry| (entry.data.len(), entry.data_size))
+        .fold((0, 0), |(acc_records, acc_size), (records, size)| {
+            (acc_records + records, acc_size + size)
+        });
+    if let Err(e) = writer.write_batch(entries, fsync).await {
+        log::error!(
+            "ingestion write file for stream {}/{} error: {}",
+            writer.get_key_str(),
+            stream_name,
+            e
+        );
     }
+
+    req_stats.size += entries_size as f64 / SIZE_IN_MB;
+    req_stats.records += entries_records as i64;
     req_stats
 }
 
 pub fn check_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Result<()> {
-    if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
+    if !LOCAL_NODE.is_ingester() {
         return Err(anyhow!("not an ingester"));
     }
+
+    // check if the org is blocked
     if !db::file_list::BLOCKED_ORGS.is_empty()
         && db::file_list::BLOCKED_ORGS.contains(&org_id.to_string())
     {
@@ -425,6 +405,9 @@ pub fn check_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Resul
             return Err(anyhow!("stream [{stream_name}] is being deleted"));
         }
     };
+
+    // check memtable
+    ingester::check_memtable_size()?;
 
     Ok(())
 }
@@ -509,33 +492,10 @@ pub fn get_val_with_type_retained(val: &Value) -> Value {
         Value::Null => Value::Null,
     }
 }
-
-pub async fn get_stream_routing(
-    stream_params: StreamParams,
-    stream_routing_map: &mut HashMap<String, Vec<Routing>>,
-) {
-    if let Some(pipeline) = STREAM_PIPELINES.get(&format!(
-        "{}/{}/{}",
-        &stream_params.org_id, stream_params.stream_type, &stream_params.stream_name,
-    )) {
-        let Some(routing) = pipeline.routing.as_ref() else {
-            return;
-        };
-        let res: Vec<Routing> = routing
-            .iter()
-            .map(|(k, v)| Routing {
-                destination: k.to_string(),
-                routing: v.clone(),
-            })
-            .collect();
-
-        stream_routing_map.insert(stream_params.stream_name.to_string(), res);
-    }
-}
-
-pub async fn get_user_defined_schema(
+pub async fn get_uds_and_original_data_streams(
     streams: &[StreamParams],
     user_defined_schema_map: &mut HashMap<String, HashSet<String>>,
+    streams_need_original: &mut HashSet<String>,
 ) {
     let cfg = get_config();
     for stream in streams {
@@ -543,7 +503,10 @@ pub async fn get_user_defined_schema(
             infra::schema::get_settings(&stream.org_id, &stream.stream_name, stream.stream_type)
                 .await
                 .unwrap_or_default();
-        if let Some(fields) = stream_settings.defined_schema_fields {
+        if stream_settings.store_original_data {
+            streams_need_original.insert(stream.stream_name.to_string());
+        }
+        if let Some(fields) = &stream_settings.defined_schema_fields {
             if !fields.is_empty() {
                 let mut fields: HashSet<_> = fields.iter().cloned().collect();
                 if !fields.contains(&cfg.common.column_timestamp) {
@@ -552,6 +515,28 @@ pub async fn get_user_defined_schema(
                 user_defined_schema_map.insert(stream.stream_name.to_string(), fields);
             }
         }
+    }
+}
+
+/// Calls the SnowflakeIdGenerator instance associated with this stream to generate a new i64 ID.
+pub fn generate_record_id(org_id: &str, stream_name: &str, stream_type: &StreamType) -> i64 {
+    let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
+    STREAM_RECORD_ID_GENERATOR
+        .entry(key)
+        .or_insert_with(|| SnowflakeIdGenerator::new(unsafe { LOCAL_NODE_ID }))
+        .generate()
+}
+
+pub fn create_log_ingestion_req(
+    ingestion_type: i32,
+    data: &bytes::Bytes,
+) -> Result<IngestionRequest> {
+    match IngestionType::try_from(ingestion_type) {
+        Ok(IngestionType::Json) => Ok(IngestionRequest::JSON(data)),
+        Ok(IngestionType::Multi) => Ok(IngestionRequest::Multi(data)),
+        Ok(IngestionType::Usage) => Ok(IngestionRequest::Usage(data)),
+        Ok(IngestionType::Rum) => Ok(IngestionRequest::RUM(data)),
+        _ => Err(anyhow::anyhow!("Not yet supported")),
     }
 }
 
@@ -566,12 +551,12 @@ mod tests {
         assert_eq!(format_partition_key("default/olympics"), "defaultolympics");
     }
     #[test]
-    fn test_get_wal_time_key() {
+    fn test_get_write_partition_key() {
         let mut local_val = Map::new();
         local_val.insert("country".to_string(), Value::String("USA".to_string()));
         local_val.insert("sport".to_string(), Value::String("basketball".to_string()));
         assert_eq!(
-            get_wal_time_key(
+            get_write_partition_key(
                 1620000000,
                 &vec![
                     StreamPartition::new("country"),
@@ -586,12 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn test_get_wal_time_key_no_partition_keys() {
+    fn test_get_write_partition_key_no_partition_keys() {
         let mut local_val = Map::new();
         local_val.insert("country".to_string(), Value::String("USA".to_string()));
         local_val.insert("sport".to_string(), Value::String("basketball".to_string()));
         assert_eq!(
-            get_wal_time_key(
+            get_write_partition_key(
                 1620000000,
                 &vec![],
                 PartitionTimeLevel::Hourly,
@@ -602,9 +587,9 @@ mod tests {
         );
     }
     #[test]
-    fn test_get_wal_time_key_no_partition_keys_no_local_val() {
+    fn test_get_write_partition_key_no_partition_keys_no_local_val() {
         assert_eq!(
-            get_wal_time_key(
+            get_write_partition_key(
                 1620000000,
                 &vec![],
                 PartitionTimeLevel::Hourly,

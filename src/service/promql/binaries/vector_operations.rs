@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -18,17 +18,15 @@ use std::{
     sync::Arc,
 };
 
+use config::meta::promql::NAME_LABEL;
 use datafusion::error::{DataFusionError, Result};
 use once_cell::sync::Lazy;
 use promql_parser::parser::{token, BinaryExpr, VectorMatchCardinality};
 use rayon::prelude::*;
 
-use crate::{
-    common::meta::prom::NAME_LABEL,
-    service::promql::{
-        binaries::scalar_binary_operations,
-        value::{signature, InstantValue, Label, LabelsExt, Sample, Signature, Value},
-    },
+use crate::service::promql::{
+    binaries::scalar_binary_operations,
+    value::{signature, InstantValue, Label, LabelsExt, Sample, Signature, Value},
 };
 
 // DROP_METRIC_VECTOR_BIN_OP if the operation is one of these, drop the metric
@@ -223,7 +221,7 @@ fn vector_and(expr: &BinaryExpr, left: &[InstantValue], right: &[InstantValue]) 
     Ok(Value::Vector(output))
 }
 
-fn vector_arithmatic_operators(
+fn vector_arithmetic_operators(
     expr: &BinaryExpr,
     left: &[InstantValue],
     right: &[InstantValue],
@@ -352,6 +350,6 @@ pub fn vector_bin_op(
         token::T_LAND => vector_and(expr, left, right),
         token::T_LOR => vector_or(expr, left, right),
         token::T_LUNLESS => vector_unless(expr, left, right),
-        _ => vector_arithmatic_operators(expr, left, right),
+        _ => vector_arithmetic_operators(expr, left, right),
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,12 +14,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use actix_web::http;
+use config::meta::alerts::templates::Template;
 
 use crate::{
     common::{
         infra::config::ALERTS_DESTINATIONS,
-        meta::{alerts::templates::Template, authz::Authz},
-        utils::auth::{remove_ownership, set_ownership},
+        meta::authz::Authz,
+        utils::auth::{is_ofga_unsupported, remove_ownership, set_ownership},
     },
     service::db,
 };
@@ -37,6 +38,12 @@ pub async fn save(
         template.name = name.to_owned();
     }
     template.name = template.name.trim().to_string();
+    // Don't allow the characters not supported by ofga
+    if is_ofga_unsupported(&template.name) {
+        return Err(anyhow::anyhow!(
+            "Alert template name cannot contain ':', '#', '?', '&', '%', quotes and space characters"
+        ));
+    }
     if template.name.is_empty() {
         return Err(anyhow::anyhow!("Alert template name is required"));
     }
@@ -105,7 +112,7 @@ pub async fn delete(org_id: &str, name: &str) -> Result<(), (http::StatusCode, a
     for dest in ALERTS_DESTINATIONS.iter() {
         if dest.key().starts_with(org_id) && dest.value().template.eq(&name) {
             return Err((
-                http::StatusCode::FORBIDDEN,
+                http::StatusCode::CONFLICT,
                 anyhow::anyhow!(
                     "Alert template is in use for destination {}",
                     &dest.value().name.clone()

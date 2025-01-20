@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -25,6 +25,8 @@ const Search = () => import("@/views/Search.vue");
 const AppMetrics = () => import("@/views/AppMetrics.vue");
 const AppTraces = () => import("@/views/AppTraces.vue");
 
+const TraceDetails = () => import("@/plugins/traces/TraceDetails.vue");
+
 const ViewDashboard = () => import("@/views/Dashboards/ViewDashboard.vue");
 const AddPanel = () => import("@/views/Dashboards/addPanel/AddPanel.vue");
 const StreamExplorer = () => import("@/views/StreamExplorer.vue");
@@ -32,8 +34,6 @@ const LogStream = () => import("@/views/LogStream.vue");
 const Alerts = () => import("@/views/AppAlerts.vue");
 const Dashboards = () => import("@/views/Dashboards/Dashboards.vue");
 const AlertList = () => import("@/components/alerts/AlertList.vue");
-const TemplateList = () => import("@/components/alerts/TemplateList.vue");
-const DestinationList = () => import("@/components/alerts/DestinationList.vue");
 const Settings = () => import("@/components/settings/index.vue");
 
 const Functions = () => import("@/views/Functions.vue");
@@ -60,7 +60,6 @@ const ErrorsDashboard = () =>
   import("@/components/rum/performance/ErrorsDashboard.vue");
 const ApiDashboard = () =>
   import("@/components/rum/performance/ApiDashboard.vue");
-const StreamRouting = () => import("@/components/functions/StreamRouting.vue");
 const PipelineEditor = () => import("@/components/pipeline/PipelineEditor.vue");
 const PipelinesList = () => import("@/components/pipeline/PipelinesList.vue");
 
@@ -110,6 +109,14 @@ const useRoutes = () => {
       meta: {
         keepAlive: true,
       },
+      beforeEnter(to: any, from: any, next: any) {
+        routeGuard(to, from, next);
+      },
+    },
+    {
+      path: "traces/trace-details",
+      name: "traceDetails",
+      component: TraceDetails,
       beforeEnter(to: any, from: any, next: any) {
         routeGuard(to, from, next);
       },
@@ -179,7 +186,7 @@ const useRoutes = () => {
       component: ImportDashboard,
       props: true,
       meta: {
-        keepAlive: true,
+        // keepAlive: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         routeGuard(to, from, next);
@@ -226,14 +233,6 @@ const useRoutes = () => {
           },
         },
         {
-          path: "stream-association",
-          name: "streamFunctions",
-          component: AssociatedStreamFunction,
-          beforeEnter(to: any, from: any, next: any) {
-            routeGuard(to, from, next);
-          },
-        },
-        {
           path: "enrichment-tables",
           name: "enrichmentTables",
           component: EnrichmentTableList,
@@ -257,43 +256,25 @@ const useRoutes = () => {
                 routeGuard(to, from, next);
               },
             },
+            {
+              path: "add",
+              name: "createPipeline",
+              component: PipelineEditor,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
+            },
           ],
         },
       ],
     },
     {
       path: "alerts",
-      name: "alerts",
-      component: Alerts,
+      name: "alertList",
+      component: AlertList,
       beforeEnter(to: any, from: any, next: any) {
         routeGuard(to, from, next);
       },
-      children: [
-        {
-          path: "alerts",
-          name: "alertList",
-          component: AlertList,
-          beforeEnter(to: any, from: any, next: any) {
-            routeGuard(to, from, next);
-          },
-        },
-        {
-          path: "destinations",
-          name: "alertDestinations",
-          component: DestinationList,
-          beforeEnter(to: any, from: any, next: any) {
-            routeGuard(to, from, next);
-          },
-        },
-        {
-          path: "templates",
-          name: "alertTemplates",
-          component: TemplateList,
-          beforeEnter(to: any, from: any, next: any) {
-            routeGuard(to, from, next);
-          },
-        },
-      ],
     },
     {
       path: "rum",
@@ -429,7 +410,7 @@ const useRoutes = () => {
         beforeEnter(to: any, from: any, next: any) {
           routeGuard(to, from, next);
         },
-      }
+      },
     );
   }
 

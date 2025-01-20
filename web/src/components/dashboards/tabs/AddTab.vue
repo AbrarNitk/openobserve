@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -94,11 +94,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import { defineComponent, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
 import { useLoading } from "@/composables/useLoading";
-import { addTab } from "@/utils/commons";
+import { addTab, getDashboard } from "@/utils/commons";
 import { useRoute } from "vue-router";
 import { editTab } from "../../../utils/commons";
+import useNotifications from "@/composables/useNotifications";
 
 const defaultValue = () => {
   return {
@@ -120,30 +120,51 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
-    dashboardData: {
-      type: Object,
+    dashboardId: {
+      validator: (value) => {
+        return typeof value === "string" || value === null;
+      },
       required: true,
+    },
+    folderId: {
+      required: false,
+      validator: (value) => {
+        return typeof value === "string" || value === null;
+      },
     },
   },
   emits: ["refresh"],
   setup(props: any, { emit }) {
+    const { t } = useI18n();
+    const route = useRoute();
     const store: any = useStore();
     const addTabForm: any = ref(null);
-    const tabData: any = ref(
-      props.editMode
-        ? JSON.parse(
-            JSON.stringify(
-              props?.dashboardData?.tabs.find(
-                (tab: any) => tab.tabId === props.tabId
-              )
+    let dashboardData: any = ref({});
+    const isValidIdentifier: any = ref(true);
+    const {
+      showPositiveNotification,
+      showErrorNotification,
+      showConfictErrorNotificationWithRefreshBtn,
+    } = useNotifications();
+    const tabData: any = ref(defaultValue());
+
+    const loadDashboardData = async () => {
+      if (props.editMode) {
+        dashboardData.value = await getDashboard(
+          store,
+          props.dashboardId,
+          props.folderId ?? route.query.folder ?? "default"
+        );
+        tabData.value = JSON.parse(
+          JSON.stringify(
+            dashboardData?.value?.tabs?.find(
+              (tab: any) => tab.tabId === props.tabId
             )
           )
-        : defaultValue()
-    );
-    const isValidIdentifier: any = ref(true);
-    const { t } = useI18n();
-    const $q = useQuasar();
-    const route = useRoute();
+        );
+      }
+    };
+    loadDashboardData();
 
     const onSubmit = useLoading(async () => {
       await addTabForm.value.validate().then(async (valid: any) => {
@@ -157,8 +178,8 @@ export default defineComponent({
             // only allowed to edit name
             const updatedTab = await editTab(
               store,
-              props.dashboardData.dashboardId,
-              route.query.folder ?? "default",
+              props.dashboardId,
+              props.folderId ?? route.query.folder ?? "default",
               tabData.value.tabId,
               tabData.value
             );
@@ -166,9 +187,7 @@ export default defineComponent({
             // emit refresh to rerender
             emit("refresh", updatedTab);
 
-            $q.notify({
-              type: "positive",
-              message: "Tab updated successfully",
+            showPositiveNotification("Tab updated successfully", {
               timeout: 2000,
             });
           }
@@ -176,17 +195,15 @@ export default defineComponent({
           else {
             const newTab = await addTab(
               store,
-              props.dashboardData.dashboardId,
-              route.query.folder ?? "default",
+              props.dashboardId,
+              props.folderId ?? route.query.folder ?? "default",
               tabData.value
             );
 
             // emit refresh to rerender
             emit("refresh", newTab);
 
-            $q.notify({
-              type: "positive",
-              message: `Tab added successfully.`,
+            showPositiveNotification("Tab added successfully", {
               timeout: 2000,
             });
           }
@@ -195,14 +212,22 @@ export default defineComponent({
             panels: [],
           };
           await addTabForm.value.resetValidation();
-        } catch (err: any) {
-          $q.notify({
-            type: "negative",
-            message:
-              err?.message ??
-              (props.editMode ? "Failed to update tab" : "Failed to add tab"),
-            timeout: 2000,
-          });
+        } catch (error: any) {
+          if (error?.response?.status === 409) {
+            showConfictErrorNotificationWithRefreshBtn(
+              error?.response?.data?.message ??
+                error?.message ??
+                (props.editMode ? "Failed to update tab" : "Failed to add tab")
+            );
+          } else {
+            showErrorNotification(
+              error?.message ??
+                (props.editMode ? "Failed to update tab" : "Failed to add tab"),
+              {
+                timeout: 2000,
+              }
+            );
+          }
         } finally {
         }
       });

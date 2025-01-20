@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,15 +13,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{collections::HashMap, io::Error};
+use std::io::Error;
 
-use actix_web::{delete, get, http, post, put, web, HttpRequest, HttpResponse};
-
-use crate::common::{
-    meta,
-    meta::functions::{StreamOrder, Transform},
-    utils::http::get_stream_type_from_request,
-};
+use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse};
+use config::meta::function::{TestVRLRequest, Transform};
 
 /// CreateFunction
 #[utoipa::path(
@@ -111,6 +106,7 @@ async fn list_functions(
     params(
         ("org_id" = String, Path, description = "Organization name"),
         ("name" = String, Path, description = "Function name"),
+        ("force" = bool, Query, description = "Force delete function regardless pipeline dependencies"),
     ),
     responses(
         (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
@@ -154,127 +150,60 @@ pub async fn update_function(
     crate::service::functions::update_function(&org_id, name, transform).await
 }
 
-/// ListStreamFunctions
+/// FunctionPipelineDependency
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
-    operation_id = "listStreamFunctions",
+    operation_id = "functionPipelineDependency",
     security(
         ("Authorization"= [])
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
+        ("name" = String, Path, description = "Function name"),
     ),
     responses(
-        (status = 200, description = "Success", content_type = "application/json", body = StreamFunctionsList),
+        (status = 200, description = "Success", content_type = "application/json", body = FunctionList),
+        (status = 404, description = "Function not found", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Internal server error", content_type = "application/json", body = HttpResponse),
     )
 )]
-#[get("/{org_id}/streams/{stream_name}/functions")]
-async fn list_stream_functions(
+#[get("/{org_id}/functions/{name}")]
+pub async fn list_pipeline_dependencies(
     path: web::Path<(String, String)>,
-    req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(
-                HttpResponse::BadRequest().json(meta::http::HttpResponse::error(
-                    http::StatusCode::BAD_REQUEST.into(),
-                    e.to_string(),
-                )),
-            );
-        }
-    };
-    crate::service::functions::list_stream_functions(&org_id, stream_type, &stream_name).await
+    let (org_id, fn_name) = path.into_inner();
+    crate::service::functions::get_pipeline_dependencies(&org_id, &fn_name).await
 }
 
-/// RemoveStreamFunction
+/// Test a Function
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
-    operation_id = "removeStreamFunction",
+    operation_id = "testFunction",
     security(
         ("Authorization"= [])
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("name" = String, Path, description = "Function name"),
     ),
-    responses(
-        (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
-        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
-    )
-)]
-#[delete("/{org_id}/streams/{stream_name}/functions/{name}")]
-async fn delete_stream_function(
-    path: web::Path<(String, String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(
-                HttpResponse::BadRequest().json(meta::http::HttpResponse::error(
-                    http::StatusCode::BAD_REQUEST.into(),
-                    e.to_string(),
-                )),
-            );
-        }
-    };
-    crate::service::functions::delete_stream_function(&org_id, stream_type, &stream_name, &name)
-        .await
-}
-
-/// ApplyFunctionToStream
-#[utoipa::path(
-    context_path = "/api",
-    tag = "Functions",
-    operation_id = "applyFunctionToStream",
-    security(
-        ("Authorization"= [])
-    ),
-    params(
-        ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("name" = String, Path, description = "Function name"),
-    ),
-    request_body(content = StreamOrder, description = "Function data", content_type = "application/json"),
+    request_body(content = TestVRLRequest, description = "Test run function", content_type = "application/json"),
     responses(
         (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
         (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
-#[put("/{org_id}/streams/{stream_name}/functions/{name}")]
-pub async fn add_function_to_stream(
-    path: web::Path<(String, String, String)>,
-    stream_order: web::Json<StreamOrder>,
-    req: HttpRequest,
+#[post("/{org_id}/functions/test")]
+pub async fn test_function(
+    path: web::Path<String>,
+    req_body: web::Json<TestVRLRequest>,
 ) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(
-                HttpResponse::BadRequest().json(meta::http::HttpResponse::error(
-                    http::StatusCode::BAD_REQUEST.into(),
-                    e.to_string(),
-                )),
-            );
-        }
-    };
-    crate::service::functions::add_function_to_stream(
-        &org_id,
-        stream_type,
-        &stream_name,
-        &name,
-        stream_order.into_inner(),
-    )
-    .await
+    let org_id = path.into_inner();
+    let TestVRLRequest { function, events } = req_body.into_inner();
+
+    // Assuming `test_function` applies the VRL function to each event
+    match crate::service::functions::test_run_function(&org_id, function, events).await {
+        Ok(result) => Ok(result),
+        Err(err) => Ok(HttpResponse::BadRequest().body(err.to_string())),
+    }
 }

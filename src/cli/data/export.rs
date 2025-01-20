@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,7 +24,10 @@ use config::meta::{
 
 use crate::{
     cli::data::{cli::Cli, Context},
-    common::utils::http::{get_search_type_from_request, get_stream_type_from_request},
+    common::utils::http::{
+        get_search_event_context_from_request, get_search_type_from_request,
+        get_stream_type_from_request,
+    },
     service::search as SearchService,
 };
 
@@ -34,43 +37,48 @@ pub struct Export {}
 impl Context for Export {
     async fn operator(c: Cli) -> Result<bool, anyhow::Error> {
         let map = HashMap::from([("type".to_string(), c.stream_type)]);
+        let query_map = Query(map);
 
-        let stream_type = match get_stream_type_from_request(&Query(map.clone())) {
+        let stream_type = match get_stream_type_from_request(&query_map) {
             Ok(v) => v.unwrap_or(StreamType::Logs),
             Err(_) => return Ok(false),
         };
 
         let cfg = config::get_config();
         let table = c.stream_name;
-        let search_type = match get_search_type_from_request(&Query(map.clone())) {
+        let search_type = match get_search_type_from_request(&query_map) {
             Ok(v) => v,
             Err(_) => return Ok(false),
         };
+        let search_event_context = search_type
+            .as_ref()
+            .and_then(|event_type| get_search_event_context_from_request(event_type, &query_map));
         let query = search::Query {
             sql: format!("select * from {}", table),
             from: 0,
             size: 100,
-            sql_mode: "full".to_owned(),
             quick_mode: false,
             query_type: "".to_owned(),
             start_time: c.start_time,
             end_time: c.end_time,
             sort_by: Some(format!("{} ASC", cfg.common.column_timestamp)),
             track_total_hits: false,
-            query_context: None,
             uses_zo_fn: false,
             query_fn: None,
             skip_wal: false,
+            streaming_output: false,
+            streaming_id: None,
         };
 
         let req = search::Request {
             query,
-            aggs: HashMap::new(),
             encoding: search::RequestEncoding::Empty,
             regions: vec![],
             clusters: vec![],
             timeout: 0,
             search_type,
+            search_event_context,
+            use_cache: None,
         };
 
         match SearchService::search("", &c.org, stream_type, None, &req).await {

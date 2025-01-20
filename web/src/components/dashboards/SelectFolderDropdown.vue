@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -28,8 +28,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       borderless
       dense
       class="q-mb-xs showLabelOnTop"
-      style="width: 88%"
+      style="width: calc(100% - 40px)"
     >
+      <template #no-option>
+        <q-item>
+          <q-item-section> {{ t("search.noResult") }}</q-item-section>
+        </q-item>
+      </template>
     </q-select>
 
     <q-btn
@@ -37,7 +42,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       data-test="dashboard-folder-move-new-add"
       label="+"
       text-color="light-text"
-      padding="sm md"
+      style="width: 40px; height: 42px"
       no-caps
       @click="
         () => {
@@ -46,7 +51,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       "
     />
   </div>
-  <!-- add/edit folder -->
+  <!-- add folder -->
   <q-dialog
     v-model="showAddFolderDialog"
     position="right"
@@ -69,18 +74,39 @@ export default defineComponent({
   name: "SelectedFolderDropdown",
   components: { AddFolder },
   emits: ["folder-selected"],
+  props: {
+    activeFolderId: {
+      required: false,
+      validator: (value) => {
+        return typeof value === "string" || value === null;
+      },
+    },
+  },
   setup(props, { emit }) {
     const store: any = useStore();
     const route = useRoute();
     const showAddFolderDialog: any = ref(false);
+
+    const getInitialFolderValue = () => {
+      // priority: activeFolderId > query.folder > default
+      // use activeFolderId if available
+      // else use router query if available
+      // else use default
+      const activeFolderData = store.state.organizationData.folders.find(
+        (item: any) =>
+          item.folderId === props.activeFolderId ??
+          route.query.folder ??
+          "default"
+      );
+
+      return {
+        label: activeFolderData?.name ?? "default",
+        value: activeFolderData?.folderId ?? "default",
+      };
+    };
+
     //dropdown selected folder index
-    const selectedFolder = ref({
-      label:
-        store.state.organizationData.folders.find(
-          (item: any) => item.folderId === route.query.folder ?? "default"
-        )?.name ?? "default",
-      value: route.query.folder ?? "default",
-    });
+    const selectedFolder = ref(getInitialFolderValue());
     const { t } = useI18n();
 
     const updateFolderList = async (newFolder: any) => {
@@ -92,25 +118,15 @@ export default defineComponent({
     };
 
     onActivated(() => {
-      selectedFolder.value = {
-        label:
-          store.state.organizationData.folders.find(
-            (item: any) => item.folderId === route.query.folder ?? "default"
-          )?.name ?? "default",
-        value: route.query.folder ?? "default",
-      };
+      // refresh selected folder
+      selectedFolder.value = getInitialFolderValue();
     });
 
     watch(
       () => store.state.organizationData.folders,
       () => {
-        selectedFolder.value = {
-          label:
-            store.state.organizationData.folders.find(
-              (item: any) => item.folderId === route.query.folder ?? "default"
-            )?.name ?? "default",
-          value: route.query.folder ?? "default",
-        };
+        // refresh selected folder, on folders list change
+        selectedFolder.value = getInitialFolderValue();
       }
     );
 

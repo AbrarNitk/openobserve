@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,33 +15,76 @@
 
 use std::{
     cmp::{max, min},
+    fs,
     ops::Range,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use config::{
-    get_config, is_local_disk_storage, metrics,
+    get_config, is_local_disk_storage,
+    meta::inverted_index::InvertedIndexTantivyMode,
+    metrics,
     utils::{
-        asynchronism::file::*,
+        file::*,
         hash::{gxhash, Sum64},
     },
+    RwAHashMap, FILE_EXT_TANTIVY, FILE_EXT_TANTIVY_FOLDER,
 };
+use hashbrown::HashMap;
 use once_cell::sync::Lazy;
-use tokio::{fs, sync::RwLock};
+use tokio::sync::RwLock;
 
 use super::CacheStrategy;
-use crate::storage;
+use crate::{cache::meta::ResultCacheMeta, storage};
 
 static FILES: Lazy<Vec<RwLock<FileData>>> = Lazy::new(|| {
     let cfg = get_config();
     let mut files = Vec::with_capacity(cfg.disk_cache.bucket_num);
     for _ in 0..cfg.disk_cache.bucket_num {
-        files.push(RwLock::new(FileData::new()));
+        files.push(RwLock::new(FileData::new(FileType::DATA)));
     }
     files
 });
+
+// read only
+static FILES_READER: Lazy<Vec<FileData>> = Lazy::new(|| {
+    let cfg = get_config();
+    let mut files = Vec::with_capacity(cfg.disk_cache.bucket_num);
+    for _ in 0..cfg.disk_cache.bucket_num {
+        files.push(FileData::new(FileType::DATA));
+    }
+    files
+});
+
+static RESULT_FILES: Lazy<Vec<RwLock<FileData>>> = Lazy::new(|| {
+    let cfg = get_config();
+    let mut files = Vec::with_capacity(cfg.disk_cache.bucket_num);
+    for _ in 0..cfg.disk_cache.bucket_num {
+        files.push(RwLock::new(FileData::new(FileType::RESULT)));
+    }
+    files
+});
+
+// read only
+static RESULT_FILES_READER: Lazy<Vec<FileData>> = Lazy::new(|| {
+    let cfg = get_config();
+    let mut files = Vec::with_capacity(cfg.disk_cache.bucket_num);
+    for _ in 0..cfg.disk_cache.bucket_num {
+        files.push(FileData::new(FileType::RESULT));
+    }
+    files
+});
+
+pub static QUERY_RESULT_CACHE: Lazy<RwAHashMap<String, Vec<ResultCacheMeta>>> =
+    Lazy::new(Default::default);
+
+pub static METRICS_RESULT_CACHE: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+pub static LOADING_FROM_DISK_NUM: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static LOADING_FROM_DISK_DONE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 pub struct FileData {
     max_size: usize,
@@ -51,30 +94,38 @@ pub struct FileData {
     data: CacheStrategy,
 }
 
+#[derive(Debug)]
+pub enum FileType {
+    DATA,
+    RESULT,
+}
+
 impl Default for FileData {
     fn default() -> Self {
-        Self::new()
+        Self::new(FileType::DATA)
     }
 }
 
 impl FileData {
-    pub fn new() -> FileData {
+    fn new(file_type: FileType) -> FileData {
         let cfg = get_config();
-        FileData::with_capacity_and_cache_strategy(
-            cfg.disk_cache.max_size,
-            &cfg.disk_cache.cache_strategy,
-        )
+        let size = match file_type {
+            FileType::DATA => cfg.disk_cache.max_size,
+            FileType::RESULT => cfg.disk_cache.result_max_size,
+        };
+        FileData::with_capacity_and_cache_strategy(size, &cfg.disk_cache.cache_strategy)
     }
 
-    pub fn with_capacity_and_cache_strategy(max_size: usize, strategy: &str) -> FileData {
+    fn with_capacity_and_cache_strategy(max_size: usize, strategy: &str) -> FileData {
         let cfg = get_config();
+
         FileData {
             max_size,
             cur_size: 0,
             root_dir: format!(
                 "{}{}",
                 cfg.common.data_cache_dir,
-                storage::format_key("", true)
+                storage::format_key("", true),
             ),
             multi_dir: cfg
                 .disk_cache
@@ -93,17 +144,21 @@ impl FileData {
 
     async fn get(&self, file: &str, range: Option<Range<usize>>) -> Option<Bytes> {
         let file_path = format!("{}{}{}", self.root_dir, self.choose_multi_dir(file), file);
-        let data = match get_file_contents(&file_path).await {
-            Ok(data) => Bytes::from(data),
-            Err(_) => {
-                return None;
-            }
-        };
-        Some(if let Some(range) = range {
-            data.slice(range)
-        } else {
-            data
+        tokio::task::spawn_blocking(move || match get_file_contents(&file_path, range) {
+            Ok(data) => Some(Bytes::from(data)),
+            Err(_) => None,
         })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn get_size(&self, file: &str) -> Option<usize> {
+        let file_path = format!("{}{}{}", self.root_dir, self.choose_multi_dir(file), file);
+        match get_file_len(&file_path) {
+            Ok(v) => Some(v as usize),
+            Err(_) => None,
+        }
     }
 
     async fn set(&mut self, trace_id: &str, file: &str, data: Bytes) -> Result<(), anyhow::Error> {
@@ -125,8 +180,8 @@ impl FileData {
         self.data.insert(file.to_string(), data_size);
         // write file into local disk
         let file_path = format!("{}{}{}", self.root_dir, self.choose_multi_dir(file), file);
-        fs::create_dir_all(Path::new(&file_path).parent().unwrap()).await?;
-        put_file_contents(&file_path, &data).await?;
+        fs::create_dir_all(Path::new(&file_path).parent().unwrap())?;
+        put_file_contents(&file_path, &data)?;
         // metrics
         let columns = file.split('/').collect::<Vec<&str>>();
         if columns[0] == "files" {
@@ -136,11 +191,20 @@ impl FileData {
             metrics::QUERY_DISK_CACHE_USED_BYTES
                 .with_label_values(&[columns[1], columns[2]])
                 .add(data_size as i64);
-        }
+        } else if columns[0] == "results" {
+            metrics::QUERY_DISK_RESULT_CACHE_USED_BYTES
+                .with_label_values(&[columns[1], columns[2]])
+                .add(data_size as i64);
+        } else if columns[0] == "metrics_results" {
+            metrics::QUERY_DISK_METRICS_CACHE_USED_BYTES
+                .with_label_values(&[])
+                .add(data_size as i64);
+        };
         Ok(())
     }
 
     async fn gc(&mut self, trace_id: &str, need_release_size: usize) -> Result<(), anyhow::Error> {
+        let cfg = get_config();
         log::info!(
             "[trace_id {trace_id}] File disk cache start gc {}/{}, need to release {} bytes",
             self.cur_size,
@@ -148,6 +212,7 @@ impl FileData {
             need_release_size
         );
         let mut release_size = 0;
+        let mut remove_result_files = vec![];
         loop {
             let item = self.data.remove();
             if item.is_none() {
@@ -164,12 +229,35 @@ impl FileData {
                 self.choose_multi_dir(key.as_str()),
                 key
             );
-            if let Err(e) = fs::remove_file(&file_path).await {
+            if let Err(e) = fs::remove_file(&file_path) {
                 log::error!(
                     "[trace_id {trace_id}] File disk cache gc remove file: {}, error: {}",
                     file_path,
                     e
                 );
+            }
+
+            // Handle for tantivy index
+            if cfg.common.inverted_index_tantivy_mode == InvertedIndexTantivyMode::Mmap.to_string()
+                && file_path.ends_with(FILE_EXT_TANTIVY)
+            {
+                let file_path = file_path.replace(FILE_EXT_TANTIVY, FILE_EXT_TANTIVY_FOLDER);
+                if let Err(e) = fs::remove_dir_all(&file_path) {
+                    log::error!(
+                        "[trace_id {trace_id}] File disk cache gc remove file: {}, error: {}",
+                        file_path,
+                        e
+                    );
+                }
+            }
+
+            if key.starts_with("results/") {
+                let columns = key.split('/').collect::<Vec<&str>>();
+                let query_key = format!(
+                    "{}_{}_{}_{}",
+                    columns[1], columns[2], columns[3], columns[4]
+                );
+                remove_result_files.push(query_key);
             }
             // metrics
             let columns = key.split('/').collect::<Vec<&str>>();
@@ -180,6 +268,14 @@ impl FileData {
                 metrics::QUERY_DISK_CACHE_USED_BYTES
                     .with_label_values(&[columns[1], columns[2]])
                     .sub(data_size as i64);
+            } else if columns[0] == "results" {
+                metrics::QUERY_DISK_RESULT_CACHE_USED_BYTES
+                    .with_label_values(&[columns[1], columns[2]])
+                    .sub(data_size as i64);
+            } else if columns[0] == "metrics_results" {
+                metrics::QUERY_DISK_METRICS_CACHE_USED_BYTES
+                    .with_label_values(&[])
+                    .sub(data_size as i64);
             }
             release_size += data_size;
             if release_size >= need_release_size {
@@ -187,10 +283,68 @@ impl FileData {
             }
         }
         self.cur_size -= release_size;
+
+        if !remove_result_files.is_empty() {
+            let mut r = QUERY_RESULT_CACHE.write().await;
+            for query_key in remove_result_files {
+                r.remove(&query_key);
+            }
+            drop(r);
+        }
         log::info!(
             "[trace_id {trace_id}] File disk cache gc done, released {} bytes",
             release_size
         );
+
+        Ok(())
+    }
+
+    async fn remove(&mut self, trace_id: &str, file: &str) -> Result<(), anyhow::Error> {
+        log::debug!("[trace_id {trace_id}] File disk cache remove file {}", file);
+
+        let Some((key, data_size)) = self.data.remove_key(file) else {
+            return Ok(());
+        };
+        self.cur_size -= data_size;
+        log::debug!(
+            "[trace_id {trace_id}] File disk cache remove file done, released {} bytes",
+            data_size
+        );
+
+        // delete file from local disk
+        let file_path = format!(
+            "{}{}{}",
+            self.root_dir,
+            self.choose_multi_dir(key.as_str()),
+            key
+        );
+        if let Err(e) = fs::remove_file(&file_path) {
+            log::error!(
+                "[trace_id {trace_id}] File disk cache gc remove file: {}, error: {}",
+                file_path,
+                e
+            );
+        }
+
+        // metrics
+        let columns = key.split('/').collect::<Vec<&str>>();
+        if columns[0] == "files" {
+            metrics::QUERY_DISK_CACHE_FILES
+                .with_label_values(&[columns[1], columns[2]])
+                .dec();
+            metrics::QUERY_DISK_CACHE_USED_BYTES
+                .with_label_values(&[columns[1], columns[2]])
+                .sub(data_size as i64);
+        } else if columns[0] == "results" {
+            metrics::QUERY_DISK_RESULT_CACHE_USED_BYTES
+                .with_label_values(&[columns[1], columns[2]])
+                .sub(data_size as i64);
+        } else if columns[0] == "metrics_results" {
+            metrics::QUERY_DISK_METRICS_CACHE_USED_BYTES
+                .with_label_values(&[])
+                .sub(data_size as i64);
+        }
+
         Ok(())
     }
 
@@ -223,6 +377,11 @@ pub async fn init() -> Result<(), anyhow::Error> {
         let root_dir = file.read().await.root_dir.clone();
         std::fs::create_dir_all(&root_dir).expect("create cache dir success");
     }
+    // trigger read only files
+    for file in FILES_READER.iter() {
+        let root_dir = file.root_dir.clone();
+        std::fs::create_dir_all(&root_dir).expect("create cache dir success");
+    }
 
     tokio::task::spawn(async move {
         log::info!("Loading disk cache start");
@@ -231,7 +390,11 @@ pub async fn init() -> Result<(), anyhow::Error> {
         if let Err(e) = load(&root_dir, &root_dir).await {
             log::error!("load disk cache error: {}", e);
         }
-        log::info!("Loading disk cache done, total files: {} ", len().await);
+        log::info!(
+            "Loading disk cache done, total files: {}",
+            LOADING_FROM_DISK_NUM.load(Ordering::Relaxed)
+        );
+        LOADING_FROM_DISK_DONE.store(true, Ordering::SeqCst);
     });
 
     tokio::task::spawn(async move {
@@ -257,8 +420,26 @@ pub async fn get(file: &str, range: Option<Range<usize>>) -> Option<Bytes> {
         return None;
     }
     let idx = get_bucket_idx(file);
-    let files = FILES[idx].read().await;
+    let files = if file.starts_with("files") {
+        FILES_READER.get(idx).unwrap()
+    } else {
+        RESULT_FILES_READER.get(idx).unwrap()
+    };
     files.get(file, range).await
+}
+
+#[inline]
+pub async fn get_size(file: &str) -> Option<usize> {
+    if !get_config().disk_cache.enabled {
+        return None;
+    }
+    let idx = get_bucket_idx(file);
+    let files = if file.starts_with("files") {
+        FILES_READER.get(idx).unwrap()
+    } else {
+        RESULT_FILES_READER.get(idx).unwrap()
+    };
+    files.get_size(file).await
 }
 
 #[inline]
@@ -267,26 +448,51 @@ pub async fn exist(file: &str) -> bool {
         return false;
     }
     let idx = get_bucket_idx(file);
-    let files = FILES[idx].read().await;
+    let files = if file.starts_with("files") {
+        FILES[idx].read().await
+    } else {
+        RESULT_FILES[idx].read().await
+    };
     files.exist(file).await
 }
 
 #[inline]
 pub async fn set(trace_id: &str, file: &str, data: Bytes) -> Result<(), anyhow::Error> {
-    if !get_config().disk_cache.enabled || is_local_disk_storage() {
+    let cfg = get_config();
+    if !cfg.disk_cache.enabled || (!cfg.common.result_cache_enabled && is_local_disk_storage()) {
         return Ok(());
     }
     let idx = get_bucket_idx(file);
-    let mut files = FILES[idx].write().await;
+    let mut files = if file.starts_with("files") {
+        FILES[idx].write().await
+    } else {
+        RESULT_FILES[idx].write().await
+    };
     if files.exist(file).await {
         return Ok(());
     }
     files.set(trace_id, file, data).await
 }
 
+#[inline]
+pub async fn remove(trace_id: &str, file: &str) -> Result<(), anyhow::Error> {
+    if !get_config().disk_cache.enabled {
+        return Ok(());
+    }
+    let idx = get_bucket_idx(file);
+    let mut files = if file.starts_with("files") {
+        FILES[idx].write().await
+    } else {
+        RESULT_FILES[idx].write().await
+    };
+    files.remove(trace_id, file).await
+}
+
 #[async_recursion]
 async fn load(root_dir: &PathBuf, scan_dir: &PathBuf) -> Result<(), anyhow::Error> {
     let mut entries = tokio::fs::read_dir(&scan_dir).await?;
+    let mut result_cache: HashMap<String, Vec<ResultCacheMeta>> = HashMap::new();
+    let mut metrics_cache: Vec<String> = Vec::new();
     loop {
         match entries.next_entry().await {
             Err(e) => return Err(e.into()),
@@ -311,7 +517,7 @@ async fn load(root_dir: &PathBuf, scan_dir: &PathBuf) -> Result<(), anyhow::Erro
                         log::error!("load disk cache error: {}", e);
                     }
                 } else {
-                    let meta = match get_file_meta(&fp).await {
+                    let meta = match get_file_meta(&fp) {
                         Ok(m) => m,
                         Err(e) => {
                             log::error!("get file meta error: {}", e);
@@ -335,27 +541,70 @@ async fn load(root_dir: &PathBuf, scan_dir: &PathBuf) -> Result<(), anyhow::Erro
                     }
                     // write into cache
                     let idx = get_bucket_idx(&file_key);
-                    let mut w = FILES[idx].write().await;
-                    w.cur_size += data_size;
-                    w.data.insert(file_key.clone(), data_size);
-                    let total = w.len();
-                    drop(w);
+                    let total = LOADING_FROM_DISK_NUM.fetch_add(1, Ordering::Relaxed);
                     // print progress
                     if total % 1000 == 0 {
                         log::info!("Loading disk cache {}", total);
                     }
-                    // metrics
-                    let columns = file_key.split('/').collect::<Vec<&str>>();
-                    metrics::QUERY_DISK_CACHE_FILES
-                        .with_label_values(&[columns[1], columns[2]])
-                        .inc();
-                    metrics::QUERY_DISK_CACHE_USED_BYTES
-                        .with_label_values(&[columns[1], columns[2]])
-                        .add(data_size as i64);
+                    if file_key.starts_with("files") {
+                        let mut w = FILES[idx].write().await;
+                        w.cur_size += data_size;
+                        w.data.insert(file_key.clone(), data_size);
+                        drop(w);
+                        // metrics
+                        let columns = file_key.split('/').collect::<Vec<&str>>();
+
+                        metrics::QUERY_DISK_CACHE_FILES
+                            .with_label_values(&[columns[1], columns[2]])
+                            .inc();
+                        metrics::QUERY_DISK_CACHE_USED_BYTES
+                            .with_label_values(&[columns[1], columns[2]])
+                            .add(data_size as i64);
+                    } else if file_key.starts_with("results") {
+                        let mut w = RESULT_FILES[idx].write().await;
+                        w.cur_size += data_size;
+                        w.data.insert(file_key.clone(), data_size);
+                        drop(w);
+                        // metrics
+                        let columns = file_key.split('/').collect::<Vec<&str>>();
+
+                        metrics::QUERY_DISK_RESULT_CACHE_USED_BYTES
+                            .with_label_values(&[columns[1], columns[2]])
+                            .add(data_size as i64);
+
+                        let columns = file_key.split('/').collect::<Vec<&str>>();
+                        let query_key = format!(
+                            "{}_{}_{}_{}",
+                            columns[1], columns[2], columns[3], columns[4]
+                        );
+                        let meta = columns[5].split('_').collect::<Vec<&str>>();
+                        let is_aggregate = meta[2] == "1";
+                        let is_descending = meta[3] == "1";
+                        result_cache.entry(query_key).or_insert_with(Vec::new).push(
+                            ResultCacheMeta {
+                                start_time: meta[0].parse().unwrap(),
+                                end_time: meta[1].parse().unwrap(),
+                                is_aggregate,
+                                is_descending,
+                            },
+                        );
+                    } else if file_key.starts_with("metrics_results") {
+                        // metrics
+                        metrics::QUERY_DISK_METRICS_CACHE_USED_BYTES
+                            .with_label_values(&[])
+                            .add(data_size as i64);
+
+                        metrics_cache.push(file_key);
+                    }
                 }
             }
         }
     }
+
+    // write all data from result_cache to QUERY_RESULT_CACHE
+    QUERY_RESULT_CACHE.write().await.extend(result_cache);
+    // write all data from metrics_cache to QUERY_METRICS_CACHE
+    METRICS_RESULT_CACHE.write().await.extend(metrics_cache);
     Ok(())
 }
 
@@ -375,14 +624,30 @@ async fn gc() -> Result<(), anyhow::Error> {
         w.gc("global", cfg.disk_cache.gc_size).await?;
         drop(w);
     }
+    for file in RESULT_FILES.iter() {
+        let r = file.read().await;
+        if r.cur_size + cfg.disk_cache.release_size < r.max_size {
+            drop(r);
+            continue;
+        }
+        drop(r);
+        let mut w = file.write().await;
+        w.gc("global", cfg.disk_cache.gc_size).await?;
+        drop(w);
+    }
     Ok(())
 }
 
 #[inline]
-pub async fn stats() -> (usize, usize) {
+pub async fn stats(file_type: FileType) -> (usize, usize) {
     let mut total_size = 0;
     let mut used_size = 0;
-    for file in FILES.iter() {
+    let files = match file_type {
+        FileType::DATA => &FILES,
+        FileType::RESULT => &RESULT_FILES,
+    };
+
+    for file in files.iter() {
         let r = file.read().await;
         let (max_size, cur_size) = r.size();
         total_size += max_size;
@@ -392,9 +657,13 @@ pub async fn stats() -> (usize, usize) {
 }
 
 #[inline]
-pub async fn len() -> usize {
+pub async fn len(file_type: FileType) -> usize {
     let mut total = 0;
-    for file in FILES.iter() {
+    let files = match file_type {
+        FileType::DATA => &FILES,
+        FileType::RESULT => &RESULT_FILES,
+    };
+    for file in files.iter() {
         let r = file.read().await;
         total += r.len();
     }
@@ -402,14 +671,23 @@ pub async fn len() -> usize {
 }
 
 #[inline]
-pub async fn is_empty() -> bool {
-    for file in FILES.iter() {
+pub async fn is_empty(file_type: FileType) -> bool {
+    let files = match file_type {
+        FileType::DATA => &FILES,
+        FileType::RESULT => &RESULT_FILES,
+    };
+
+    for file in files.iter() {
         let r = file.read().await;
         if !r.is_empty() {
             return false;
         }
     }
     true
+}
+#[inline]
+pub async fn get_dir() -> String {
+    FILES[0].read().await.root_dir.clone()
 }
 
 pub async fn download(trace_id: &str, file: &str) -> Result<(), anyhow::Error> {
@@ -508,7 +786,7 @@ mod tests {
         let content = Bytes::from("Some text Need to store in cache");
         for i in 0..100 {
             let file_key = format!(
-                "files/default/logs/olympics/2022/10/03/10/6982652937134804993_1_{}.parquet",
+                "files/default/logs/olympics/2022/10/03/10/6982652937134804993_4_{}.parquet",
                 i
             );
             let resp = file_data.set(trace_id, &file_key, content.clone()).await;
@@ -521,7 +799,7 @@ mod tests {
         let trace_id = "session_123";
         let mut file_data =
             FileData::with_capacity_and_cache_strategy(get_config().disk_cache.max_size, "fifo");
-        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_2_1.parquet";
+        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_5_1.parquet";
         let content = Bytes::from("Some text");
 
         file_data
@@ -542,8 +820,8 @@ mod tests {
     async fn test_fifo_cache_miss() {
         let trace_id = "session_456";
         let mut file_data = FileData::with_capacity_and_cache_strategy(10, "fifo");
-        let file_key1 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_3_1.parquet";
-        let file_key2 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_3_2.parquet";
+        let file_key1 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_6_1.parquet";
+        let file_key2 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_6_2.parquet";
         let content = Bytes::from("Some text");
         // set one key
         file_data
@@ -573,7 +851,7 @@ mod tests {
         let mut file_data =
             FileData::with_capacity_and_cache_strategy(get_config().disk_cache.max_size, "lru");
         file_data.multi_dir = multi_dir;
-        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_2_1.parquet";
+        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_7_1.parquet";
         let content = Bytes::from("Some text");
 
         file_data

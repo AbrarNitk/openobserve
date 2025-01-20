@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,7 +21,7 @@ use std::{
 };
 
 use async_walkdir::WalkDir;
-use config::utils::{schema::infer_json_schema_from_values, schema_ext::SchemaExt};
+use config::utils::schema::infer_json_schema_from_values;
 use futures::StreamExt;
 use snafu::ResultExt;
 
@@ -175,7 +175,7 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
             let Some(entry_bytes) = entry else {
                 break;
             };
-            let mut entry = match super::Entry::from_bytes(&entry_bytes) {
+            let entry = match super::Entry::from_bytes(&entry_bytes) {
                 Ok(v) => v,
                 Err(Error::ReadDataError { source }) => {
                     log::error!("Unable to read entry from: {}, skip the entry", source);
@@ -191,8 +191,7 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
                 infer_json_schema_from_values(entry.data.iter().cloned(), stream_type)
                     .context(InferJsonSchemaSnafu)?;
             let infer_schema = Arc::new(infer_schema);
-            entry.schema_key = infer_schema.hash_key().into();
-            let batch = entry.into_batch(infer_schema.clone())?;
+            let batch = entry.into_batch(key.stream_type.clone(), infer_schema.clone())?;
             memtable.write(infer_schema, entry, batch)?;
         }
         log::warn!(
@@ -206,6 +205,11 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
             wal_file.to_owned(),
             Arc::new(immutable::Immutable::new(idx, key, memtable)),
         );
+
+        // to avoid the memory OOM, sleep for a while after reply one wal file
+        if immutable::len().await > 2 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
     }
 
     Ok(())
@@ -217,8 +221,15 @@ async fn wal_scan_files(root_dir: impl Into<PathBuf>, ext: &str) -> Result<Vec<P
             let entry = entry.ok()?;
             let path = entry.path();
             if path.is_file() {
-                let path_ext = path.extension()?.to_str()?;
-                if path_ext == ext { Some(path) } else { None }
+                let path_ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if path_ext == ext {
+                    Some(path)
+                } else {
+                    None
+                }
             } else {
                 None
             }

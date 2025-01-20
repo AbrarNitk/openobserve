@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -43,11 +43,9 @@ const useStreams = () => {
       // We don't fetch schema while fetching all streams or specific type all streams
       // So keeping it false, don't change this
       schema = false;
-
       if (getStreamsPromise.value) {
         await getStreamsPromise.value;
       }
-      console.log("_streamName", _streamName);
       try {
         if (!isStreamFetched(streamName || "all")) {
           // Added adddtional check to fetch all streamstype separately if streamName is all
@@ -108,6 +106,7 @@ const useStreams = () => {
                 reject(new Error(e.message));
               });
           } else {
+
             getStreamsPromise.value = StreamService.nameList(
               store.state.selectedOrganization.identifier,
               _streamName,
@@ -167,7 +166,6 @@ const useStreams = () => {
         resolve(null);
       }
 
-      console.log("getStream", streamName);
       // Wait for the streams to be fetched if they are being fetched
       if (getStreamsPromise.value) {
         await getStreamsPromise.value;
@@ -201,7 +199,9 @@ const useStreams = () => {
                 streamName,
                 streamType
               );
-              streams[streamType].list[streamIndex] = _stream.data;
+              streams[streamType].list[streamIndex] = removeSchemaFields(
+                _stream.data
+              );
             } catch (err) {
               return reject("Error while fetching schema");
             }
@@ -228,7 +228,11 @@ const useStreams = () => {
   };
 
   const getMultiStreams = async (
-    _streams: Array<{ streamName: string; streamType: string; schema: boolean }>
+    _streams: Array<{
+      streamName: string;
+      streamType: string;
+      schema: boolean;
+    }>
   ): Promise<any[]> => {
     return Promise.all(
       _streams.map(async ({ streamName, streamType, schema }) => {
@@ -258,7 +262,9 @@ const useStreams = () => {
                 streamType
               );
 
-              streams[streamType].list[streamIndex] = fetchedStream.data;
+              streams[streamType].list[streamIndex] = removeSchemaFields(
+                fetchedStream.data
+              );
             }
           }
 
@@ -273,6 +279,15 @@ const useStreams = () => {
       })
     );
   };
+
+  function removeSchemaFields(streamData: any) {
+    if (streamData.schema) {
+      streamData.schema = streamData.schema.filter((field: any) => {
+        return field.name != "_original" && field.name != "_o2_id";
+      });
+    }
+    return streamData;
+  }
 
   const isStreamFetched = (streamType: string) => {
     let isStreamFetched = false;
@@ -404,6 +419,167 @@ const useStreams = () => {
     store.dispatch("setIsDataIngested", false);
   };
 
+  function compareArrays(previousArray: any, currentArray: any) {
+    const add = [];
+    const remove = [];
+
+    // Convert previousArray into a map for easy lookup
+    const previousMap = new Map();
+    for (const key in previousArray) {
+      const prevItem = previousArray[key];
+      previousMap.set(prevItem.field, prevItem);
+    }
+
+    // Convert currentArray into a map for easy lookup
+    const currentMap = new Map();
+    for (const currentItem of currentArray) {
+      currentMap.set(currentItem.field, currentItem);
+    }
+
+    // Check for items in currentArray that are not in previousArray
+    for (const currentItem of currentArray) {
+      const prevItem = previousMap.get(currentItem.field);
+      if (!prevItem || !deepEqual(currentItem, prevItem)) {
+        add.push(currentItem);
+      }
+    }
+
+    // Check for items in previousArray that are not in currentArray
+    for (const [field, prevItem] of previousMap) {
+      const currentItem = currentMap.get(field);
+      if (!currentItem || !deepEqual(prevItem, currentItem)) {
+        remove.push(prevItem);
+      }
+    }
+
+    return { add, remove };
+  }
+
+  // Helper function to deeply compare two objects, considering the "types" object and ignoring the "disabled" attribute
+  function deepEqual(objA: any, objB: any) {
+    if (
+      typeof objA !== "object" ||
+      typeof objB !== "object" ||
+      objA === null ||
+      objB === null
+    ) {
+      return objA === objB;
+    }
+
+    const keysA = Object.keys(objA);
+    const keysB = Object.keys(objB);
+
+    if (keysA.length !== keysB.length) return false;
+
+    for (const key of keysA) {
+      if (typeof objA[key] === "object" && typeof objB[key] === "object") {
+        if (!deepEqual(objA[key], objB[key])) return false;
+      } else if (objA[key] !== objB[key]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  const getUpdatedSettings = (previousSettings: any, currentSettings: any) => {
+    const attributesToCompare: Array<string> = [
+      "partition_keys",
+      "index_fields",
+      "full_text_search_keys",
+      "bloom_filter_fields",
+      "defined_schema_fields",
+      "extended_retention_days",
+    ];
+
+    let updatedSettings: any = {};
+    updatedSettings = { ...currentSettings };
+
+    attributesToCompare.forEach((attribute) => {
+      const previousArray =
+        Array.isArray(previousSettings[attribute]) ||
+        typeof previousSettings[attribute] === "object"
+          ? previousSettings[attribute]
+          : [];
+      const currentArray =
+        Array.isArray(currentSettings[attribute]) ||
+        typeof currentSettings[attribute] === "object"
+          ? currentSettings[attribute]
+          : [];
+
+      let add: any[] = [];
+      let remove: any[] = [];
+
+
+      if (
+        attribute === "partition_keys" &&
+        typeof previousArray === "object" &&
+        typeof currentArray === "object"
+      ) {
+        // add = currentArray.filter(
+        //   (currentItem: any) =>
+        //     !Object.values(previousArray).some((previousItem: any) =>
+        //       deepEqual(currentItem, previousItem),
+        //     ),
+        // );
+
+        // remove = Object.values(previousArray).filter(
+        //   (previousItem: any) =>
+        //     !Object.values(currentArray).some((currentItem: any) =>
+        //       deepEqual(previousItem, currentItem),
+        //     ),
+        // );
+        const result: any = compareArrays(previousArray, currentArray);
+        add = result.add;
+        remove = result.remove;
+        remove = remove.filter((item: any) => {
+          const isInAdd = add.some(
+            (addItem: any) => addItem.field === item.field
+          );
+
+          // Only keep in `remove` if not in `add` and `disabled` is false
+          return !isInAdd && item.disabled === false;
+        });
+      } else if (attribute === "extended_retention_days") {
+        add = currentArray.filter(
+          (currentItem: any) =>
+            !previousArray.some(
+              (previousItem: any) =>
+                JSON.stringify(currentItem) === JSON.stringify(previousItem),
+            ),
+        );
+        remove = previousArray.filter(
+          (previousItem: any) =>
+            !currentArray.some(
+              (currentItem: any) =>
+                JSON.stringify(previousItem) === JSON.stringify(currentItem),
+            ),
+        );
+      } else {
+        // For other attributes, do a simple array comparison
+        add = currentArray.filter((item: any) => !previousArray.includes(item));
+        remove = previousArray.filter(
+          (item: any) => !currentArray.includes(item)
+        );
+      }
+
+      // Add the _add and _remove arrays to the result
+      updatedSettings[`${attribute}`] = { add: add, remove: remove };
+    });
+
+    return updatedSettings;
+  };
+
+  const resetStreamType = (streamType="") => {
+    try {
+      if (streamType != "" && Object.hasOwn(streams, streamType)) {
+        delete streams[streamType];
+      }
+    } catch (e) {
+      console.log("Error while clearing local cache for stream type.", e);
+    }
+  };
+
   return {
     getStreams,
     getStream,
@@ -412,6 +588,8 @@ const useStreams = () => {
     resetStreams,
     removeStream,
     addStream,
+    getUpdatedSettings,
+    resetStreamType,
   };
 };
 

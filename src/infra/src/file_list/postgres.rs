@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,16 +13,29 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashMap as stdHashMap;
+
 use async_trait::async_trait;
 use config::{
-    meta::stream::{FileKey, FileMeta, PartitionTimeLevel, StreamStats, StreamType},
-    utils::{hash::Sum64, parquet::parse_file_key_columns},
+    get_config,
+    meta::stream::{
+        FileKey, FileListDeleted, FileMeta, PartitionTimeLevel, StreamStats, StreamType,
+    },
+    metrics::{DB_QUERY_NUMS, DB_QUERY_TIME},
+    utils::{
+        hash::Sum64,
+        parquet::parse_file_key_columns,
+        time::{end_of_the_day, DAY_MICRO_SECS},
+    },
 };
 use hashbrown::HashMap;
 use sqlx::{Executor, Postgres, QueryBuilder, Row};
 
 use crate::{
-    db::postgres::CLIENT,
+    db::{
+        postgres::{create_index, CLIENT},
+        IndexStatement,
+    },
     errors::{Error, Result},
 };
 
@@ -62,6 +75,10 @@ impl super::FileList for PostgresFileList {
         let pool = CLIENT.clone();
         let (stream_key, date_key, file_name) =
             parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+
+        DB_QUERY_NUMS
+            .with_label_values(&["delete", "file_list"])
+            .inc();
         sqlx::query(r#"DELETE FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;"#)
             .bind(stream_key)
             .bind(date_key)
@@ -73,6 +90,10 @@ impl super::FileList for PostgresFileList {
 
     async fn batch_add(&self, files: &[FileKey]) -> Result<()> {
         self.inner_batch_add("file_list", files).await
+    }
+
+    async fn batch_add_with_id(&self, _files: &[(i64, &FileKey)]) -> Result<()> {
+        unimplemented!("Unsupported")
     }
 
     async fn batch_add_history(&self, files: &[FileKey]) -> Result<()> {
@@ -91,18 +112,30 @@ impl super::FileList for PostgresFileList {
             for file in files {
                 let (stream_key, date_key, file_name) =
                     parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
-                let ret: Option<i64> = match sqlx::query_scalar(
+                DB_QUERY_NUMS
+                    .with_label_values(&["select", "file_list"])
+                    .inc();
+                let start = std::time::Instant::now();
+                let query_res = sqlx::query_scalar(
                     r#"SELECT id FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;"#,
                 )
                 .bind(stream_key)
                 .bind(date_key)
                 .bind(file_name)
                 .fetch_one(&pool)
-                .await
-                {
+                .await;
+                let time = start.elapsed().as_secs_f64();
+                DB_QUERY_TIME
+                    .with_label_values(&["select_id", "file_list"])
+                    .observe(time);
+                let ret: Option<i64> = match query_res {
                     Ok(v) => v,
-                    Err(sqlx::Error::RowNotFound) => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(sqlx::Error::RowNotFound) => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
                 };
                 match ret {
                     Some(v) => ids.push(v.to_string()),
@@ -116,8 +149,16 @@ impl super::FileList for PostgresFileList {
             }
             // delete files by ids
             if !ids.is_empty() {
+                DB_QUERY_NUMS
+                    .with_label_values(&["delete", "file_list"])
+                    .inc();
                 let sql = format!("DELETE FROM file_list WHERE id IN({});", ids.join(","));
+                let start = std::time::Instant::now();
                 _ = pool.execute(sql.as_str()).await?;
+                let time = start.elapsed().as_secs_f64();
+                DB_QUERY_TIME
+                    .with_label_values(&["delete_id", "file_list"])
+                    .observe(time);
             }
         }
         Ok(())
@@ -126,9 +167,8 @@ impl super::FileList for PostgresFileList {
     async fn batch_add_deleted(
         &self,
         org_id: &str,
-        flattened: bool,
         created_at: i64,
-        files: &[String],
+        files: &[FileListDeleted],
     ) -> Result<()> {
         if files.is_empty() {
             return Ok(());
@@ -138,18 +178,22 @@ impl super::FileList for PostgresFileList {
         for files in chunks {
             let mut tx = pool.begin().await?;
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                "INSERT INTO file_list_deleted (org, stream, date, file, flattened, created_at)",
+                "INSERT INTO file_list_deleted (org, stream, date, file, index_file, flattened, created_at)",
             );
             query_builder.push_values(files, |mut b, item| {
                 let (stream_key, date_key, file_name) =
-                    parse_file_key_columns(item).expect("parse file key failed");
+                    parse_file_key_columns(&item.file).expect("parse file key failed");
                 b.push_bind(org_id)
                     .push_bind(stream_key)
                     .push_bind(date_key)
                     .push_bind(file_name)
-                    .push_bind(flattened)
+                    .push_bind(item.index_file)
+                    .push_bind(item.flattened)
                     .push_bind(created_at);
             });
+            DB_QUERY_NUMS
+                .with_label_values(&["insert", "file_list_deleted"])
+                .inc();
             if let Err(e) = query_builder.build().execute(&mut *tx).await {
                 if let Err(e) = tx.rollback().await {
                     log::error!(
@@ -158,7 +202,7 @@ impl super::FileList for PostgresFileList {
                     );
                 }
                 return Err(e.into());
-            };
+            }
             if let Err(e) = tx.commit().await {
                 log::error!("[POSTGRES] commit file_list_deleted batch add error: {}", e);
                 return Err(e.into());
@@ -179,18 +223,26 @@ impl super::FileList for PostgresFileList {
             for file in files {
                 let (stream_key, date_key, file_name) =
                     parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
-                let ret: Option<i64> = match sqlx::query_scalar(
-                    r#"SELECT id FROM file_list_deleted WHERE stream = $1 AND date = $2 AND file = $3;"#,
-                )
-                .bind(stream_key)
-                .bind(date_key)
-                .bind(file_name)
-                .fetch_one(&pool)
-                .await
+                DB_QUERY_NUMS
+                    .with_label_values(&["select", "file_list_deleted"])
+                    .inc();
+                let ret: Option<i64> = match
+                    sqlx
+                        ::query_scalar(
+                            r#"SELECT id FROM file_list_deleted WHERE stream = $1 AND date = $2 AND file = $3;"#
+                        )
+                        .bind(stream_key)
+                        .bind(date_key)
+                        .bind(file_name)
+                        .fetch_one(&pool).await
                 {
                     Ok(v) => v,
-                    Err(sqlx::Error::RowNotFound) => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(sqlx::Error::RowNotFound) => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
                 };
                 match ret {
                     Some(v) => ids.push(v.to_string()),
@@ -204,6 +256,9 @@ impl super::FileList for PostgresFileList {
             }
             // delete files by ids
             if !ids.is_empty() {
+                DB_QUERY_NUMS
+                    .with_label_values(&["delete", "file_list_deleted"])
+                    .inc();
                 let sql = format!(
                     "DELETE FROM file_list_deleted WHERE id IN({});",
                     ids.join(",")
@@ -218,24 +273,35 @@ impl super::FileList for PostgresFileList {
         let pool = CLIENT.clone();
         let (stream_key, date_key, file_name) =
             parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let start = std::time::Instant::now();
         let ret = sqlx::query_as::<_, super::FileRecord>(
             r#"
-SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, flattened
+SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, index_size, flattened
     FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;
-            "#,
-        )
-        .bind(stream_key)
-        .bind(date_key)
-        .bind(file_name)
-        .fetch_one(&pool)
-        .await?;
-        Ok(FileMeta::from(&ret))
+            "#
+            )
+            .bind(stream_key)
+            .bind(date_key)
+            .bind(file_name)
+            .fetch_one(&pool).await;
+        let time = start.elapsed().as_secs_f64();
+        DB_QUERY_TIME
+            .with_label_values(&["get_single", "file_list"])
+            .observe(time);
+        Ok(FileMeta::from(&ret?))
     }
 
     async fn contains(&self, file: &str) -> Result<bool> {
         let pool = CLIENT.clone();
         let (stream_key, date_key, file_name) =
             parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let start = std::time::Instant::now();
         let ret = sqlx::query(
             r#"SELECT * FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;"#,
         )
@@ -244,6 +310,10 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         .bind(file_name)
         .fetch_one(&pool)
         .await;
+        let time = start.elapsed().as_secs_f64();
+        DB_QUERY_TIME
+            .with_label_values(&["contains", "file_list"])
+            .observe(time);
         if let Err(sqlx::Error::RowNotFound) = ret {
             return Ok(false);
         }
@@ -254,6 +324,9 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         let pool = CLIENT.clone();
         let (stream_key, date_key, file_name) =
             parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list"])
+            .inc();
         sqlx::query(
             r#"UPDATE file_list SET flattened = $1 WHERE stream = $2 AND date = $3 AND file = $4;"#,
         )
@@ -288,41 +361,219 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         let stream_key = format!("{org_id}/{stream_type}/{stream_name}");
 
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let start = std::time::Instant::now();
         let ret = if flattened.is_some() {
             sqlx::query_as::<_, super::FileRecord>(
                 r#"
-SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, flattened
+SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, index_size, flattened
     FROM file_list 
     WHERE stream = $1 AND flattened = $2 LIMIT 1000;
-                "#,
-            )
-            .bind(stream_key)
-            .bind(flattened.unwrap())
-            .fetch_all(&pool)
-            .await
+                "#
+                )
+                .bind(stream_key)
+                .bind(flattened.unwrap())
+                .fetch_all(&pool).await
         } else {
             let (time_start, time_end) = time_range.unwrap_or((0, 0));
-            sqlx::query_as::<_, super::FileRecord>(
-                r#"
-SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, flattened
+            let max_ts_upper_bound = super::calculate_max_ts_upper_bound(time_end, stream_type);
+            let sql = r#"
+SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, index_size, flattened
     FROM file_list 
-    WHERE stream = $1 AND max_ts >= $2 AND min_ts <= $3;
-                "#,
-            )
-            .bind(stream_key)
-            .bind(time_start)
-            .bind(time_end)
-            .fetch_all(&pool)
-            .await
+    WHERE stream = $1 AND max_ts >= $2 AND max_ts <= $3 AND min_ts <= $4;
+                "#;
+
+            sqlx::query_as::<_, super::FileRecord>(sql)
+                .bind(stream_key)
+                .bind(time_start)
+                .bind(max_ts_upper_bound)
+                .bind(time_end)
+                .fetch_all(&pool)
+                .await
         };
+        let time = start.elapsed().as_secs_f64();
+        DB_QUERY_TIME
+            .with_label_values(&["get_multiple", "file_list"])
+            .observe(time);
         Ok(ret?
             .into_iter()
             .map(|r| {
                 (
-                    format!("files/{}/{}/{}", r.stream, r.date, r.file),
+                    "files/".to_string() + &r.stream + "/" + &r.date + "/" + &r.file,
                     FileMeta::from(&r),
                 )
             })
+            .collect())
+    }
+
+    async fn query_by_ids(&self, ids: &[i64]) -> Result<Vec<(i64, String, FileMeta)>> {
+        if ids.is_empty() {
+            return Ok(Vec::default());
+        }
+        let mut ret = Vec::new();
+        let pool = CLIENT.clone();
+
+        for chunk in ids.chunks(get_config().limit.file_list_id_batch_size) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let ids = chunk
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+                .join(",");
+            let query_str = format!(
+                "SELECT id, stream, date, file, min_ts, max_ts, records, original_size, compressed_size, index_size FROM file_list WHERE id IN ({ids})"
+            );
+            DB_QUERY_NUMS
+                .with_label_values(&["select", "file_list"])
+                .inc();
+            let start = std::time::Instant::now();
+            let res = sqlx::query_as::<_, super::FileRecord>(&query_str)
+                .fetch_all(&pool)
+                .await;
+            let time = start.elapsed().as_secs_f64();
+            DB_QUERY_TIME
+                .with_label_values(&["get_by_id", "file_list"])
+                .observe(time);
+            ret.extend_from_slice(&res?);
+        }
+
+        Ok(ret
+            .into_iter()
+            .map(|r| {
+                (
+                    r.id,
+                    "files/".to_string() + &r.stream + "/" + &r.date + "/" + &r.file,
+                    FileMeta::from(&r),
+                )
+            })
+            .collect())
+    }
+
+    async fn query_ids(
+        &self,
+        org_id: &str,
+        stream_type: StreamType,
+        stream_name: &str,
+        time_range: Option<(i64, i64)>,
+    ) -> Result<Vec<super::FileId>> {
+        if let Some((start, end)) = time_range {
+            if start == 0 && end == 0 {
+                return Ok(Vec::new());
+            }
+        }
+
+        let stream_key = format!("{org_id}/{stream_type}/{stream_name}");
+        let (time_start, time_end) = time_range.unwrap_or((0, 0));
+        let start = std::time::Instant::now();
+
+        let day_partitions = if time_end - time_start <= DAY_MICRO_SECS
+            || time_end - time_start > DAY_MICRO_SECS * 30
+            || !get_config().limit.file_list_multi_thread
+        {
+            vec![(time_start, time_end)]
+        } else {
+            let mut partitions = Vec::new();
+            let mut start = time_start;
+            while start < time_end {
+                let end_of_day = std::cmp::min(end_of_the_day(start), time_end);
+                partitions.push((start, end_of_day));
+                start = end_of_day + 1; // next day, use end_of_day + 1 microsecond
+            }
+            partitions
+        };
+        log::debug!("file_list day_partitions: {:?}", day_partitions);
+
+        let mut tasks = Vec::with_capacity(day_partitions.len());
+
+        for (time_start, time_end) in day_partitions {
+            let stream_key = stream_key.clone();
+            tasks.push(tokio::task::spawn(async move {
+                let pool = CLIENT.clone();
+                DB_QUERY_NUMS
+                .with_label_values(&["select", "file_list"])
+                .inc();
+                let max_ts_upper_bound = super::calculate_max_ts_upper_bound(time_end, stream_type);
+                let query = "SELECT id, records, original_size FROM file_list WHERE stream = $1 AND max_ts >= $2 AND max_ts <= $3 AND min_ts <= $4;";
+                sqlx::query_as::<_, super::FileId>(query)
+                .bind(stream_key)
+                .bind(time_start)
+                .bind(max_ts_upper_bound)
+                .bind(time_end)
+                .fetch_all(&pool)
+                .await
+            }));
+        }
+
+        let mut rets = Vec::new();
+        for task in tasks {
+            match task.await {
+                Ok(Ok(r)) => rets.extend(r),
+                Ok(Err(e)) => {
+                    return Err(e.into());
+                }
+                Err(e) => {
+                    return Err(Error::Message(e.to_string()));
+                }
+            };
+        }
+        let time = start.elapsed().as_secs_f64();
+        DB_QUERY_TIME
+            .with_label_values(&["get_ids", "file_list"])
+            .observe(time);
+        Ok(rets)
+    }
+
+    async fn query_old_data_hours(
+        &self,
+        org_id: &str,
+        stream_type: StreamType,
+        stream_name: &str,
+        time_range: Option<(i64, i64)>,
+    ) -> Result<Vec<String>> {
+        if let Some((start, end)) = time_range {
+            if start == 0 && end == 0 {
+                return Ok(Vec::new());
+            }
+        }
+
+        let stream_key = format!("{org_id}/{stream_type}/{stream_name}");
+
+        let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let start = std::time::Instant::now();
+        let (time_start, time_end) = time_range.unwrap_or((0, 0));
+        let cfg = get_config();
+        let max_ts_upper_bound = super::calculate_max_ts_upper_bound(time_end, stream_type);
+        let sql = r#"
+SELECT date
+    FROM file_list 
+    WHERE stream = $1 AND max_ts >= $2 AND max_ts <= $3 AND min_ts <= $4 AND records < $5
+    GROUP BY date HAVING count(*) >= $6;
+            "#;
+
+        let ret = sqlx::query(sql)
+            .bind(stream_key)
+            .bind(time_start)
+            .bind(max_ts_upper_bound)
+            .bind(time_end)
+            .bind(cfg.compact.old_data_min_records)
+            .bind(cfg.compact.old_data_min_files)
+            .fetch_all(&pool)
+            .await?;
+
+        let time = start.elapsed().as_secs_f64();
+        DB_QUERY_TIME
+            .with_label_values(&["query_old_data_hours", "file_list"])
+            .observe(time);
+        Ok(ret
+            .into_iter()
+            .map(|r| r.try_get::<String, &str>("date").unwrap_or_default())
             .collect())
     }
 
@@ -331,26 +582,28 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         org_id: &str,
         time_max: i64,
         limit: i64,
-    ) -> Result<Vec<(String, bool)>> {
+    ) -> Result<Vec<FileListDeleted>> {
         if time_max == 0 {
             return Ok(Vec::new());
         }
         let pool = CLIENT.clone();
-        let ret = sqlx::query_as::<_, super::FileDeletedRecord>(
-            r#"SELECT stream, date, file, flattened FROM file_list_deleted WHERE org = $1 AND created_at < $2 LIMIT $3;"#,
-        )
-        .bind(org_id)
-        .bind(time_max)
-        .bind(limit)
-        .fetch_all(&pool)
-        .await?;
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list_deleted"])
+            .inc();
+        let ret = sqlx
+            ::query_as::<_, super::FileDeletedRecord>(
+                r#"SELECT stream, date, file, index_file, flattened FROM file_list_deleted WHERE org = $1 AND created_at < $2 LIMIT $3;"#
+            )
+            .bind(org_id)
+            .bind(time_max)
+            .bind(limit)
+            .fetch_all(&pool).await?;
         Ok(ret
             .iter()
-            .map(|r| {
-                (
-                    format!("files/{}/{}/{}", r.stream, r.date, r.file),
-                    r.flattened,
-                )
+            .map(|r| FileListDeleted {
+                file: format!("files/{}/{}/{}", r.stream, r.date, r.file),
+                index_file: r.index_file,
+                flattened: r.flattened,
             })
             .collect())
     }
@@ -364,6 +617,9 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         let stream_key = format!("{org_id}/{stream_type}/{stream_name}");
         let min_ts = config::utils::time::BASE_TIME.timestamp_micros();
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
         let ret: Option<i64> = sqlx::query_scalar(
             r#"SELECT MIN(min_ts)::BIGINT AS id FROM file_list WHERE stream = $1 AND min_ts > $2;"#,
         )
@@ -376,11 +632,30 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
 
     async fn get_max_pk_value(&self) -> Result<i64> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
         let ret: Option<i64> =
             sqlx::query_scalar(r#"SELECT MAX(id)::BIGINT AS id FROM file_list;"#)
                 .fetch_one(&pool)
                 .await?;
         Ok(ret.unwrap_or_default())
+    }
+
+    async fn get_min_pk_value(&self) -> Result<i64> {
+        let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let ret: Option<i64> =
+            sqlx::query_scalar(r#"SELECT MIN(id)::BIGINT AS id FROM file_list;"#)
+                .fetch_one(&pool)
+                .await?;
+        Ok(ret.unwrap_or_default())
+    }
+
+    async fn clean_by_min_pk_value(&self, _val: i64) -> Result<()> {
+        Ok(()) // do nothing
     }
 
     async fn stats(
@@ -406,10 +681,10 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
         let sql = format!(
             r#"
 SELECT stream, MIN(min_ts) AS min_ts, MAX(max_ts) AS max_ts, COUNT(*)::BIGINT AS file_num, 
-    SUM(records)::BIGINT AS records, SUM(original_size)::BIGINT AS original_size, SUM(compressed_size)::BIGINT AS compressed_size
+    SUM(records)::BIGINT AS records, SUM(original_size)::BIGINT AS original_size, SUM(compressed_size)::BIGINT AS compressed_size, SUM(index_size)::BIGINT AS index_size
     FROM file_list 
     WHERE {field} = '{value}'
-            "#,
+            "#
         );
         let sql = match pk_value {
             None => format!("{} GROUP BY stream", sql),
@@ -419,6 +694,9 @@ SELECT stream, MIN(min_ts) AS min_ts, MAX(max_ts) AS max_ts, COUNT(*)::BIGINT AS
             }
         };
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
         let ret = sqlx::query_as::<_, super::StatsRecord>(&sql)
             .fetch_all(&pool)
             .await?;
@@ -445,6 +723,9 @@ SELECT stream, MIN(min_ts) AS min_ts, MAX(max_ts) AS max_ts, COUNT(*)::BIGINT AS
             format!("SELECT * FROM stream_stats WHERE org = '{}';", org_id)
         };
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "stream_stats"])
+            .inc();
         let ret = sqlx::query_as::<_, super::StatsRecord>(&sql)
             .fetch_all(&pool)
             .await?;
@@ -465,6 +746,9 @@ SELECT stream, MIN(min_ts) AS min_ts, MAX(max_ts) AS max_ts, COUNT(*)::BIGINT AS
             org_id, stream_type, stream_name
         );
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["delete", "stream_stats"])
+            .inc();
         sqlx::query(&sql).execute(&pool).await?;
         Ok(())
     }
@@ -487,18 +771,21 @@ SELECT stream, MIN(min_ts) AS min_ts, MAX(max_ts) AS max_ts, COUNT(*)::BIGINT AS
                     StreamStats::default()
                 }
             };
-            stats.add_stream_stats(item);
+            stats.format_by(item); // format stats
             update_streams.push((stream_key, stats));
         }
 
         let mut tx = pool.begin().await?;
         for stream_key in new_streams {
             let org_id = stream_key[..stream_key.find('/').unwrap()].to_string();
+            DB_QUERY_NUMS
+                .with_label_values(&["insert", "stream_stats"])
+                .inc();
             if let Err(e) = sqlx::query(
                 r#"
 INSERT INTO stream_stats 
-    (org, stream, file_num, min_ts, max_ts, records, original_size, compressed_size)
-    VALUES ($1, $2, 0, 0, 0, 0, 0, 0);
+    (org, stream, file_num, min_ts, max_ts, records, original_size, compressed_size, index_size)
+    VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0);
                 "#,
             )
             .bind(org_id)
@@ -519,22 +806,28 @@ INSERT INTO stream_stats
 
         let mut tx = pool.begin().await?;
         for (stream_key, stats) in update_streams {
-            if let Err(e) = sqlx::query(
-                r#"
+            DB_QUERY_NUMS
+                .with_label_values(&["update", "stream_stats"])
+                .inc();
+            if
+                let Err(e) = sqlx
+                    ::query(
+                        r#"
 UPDATE stream_stats 
-    SET file_num = $1, min_ts = $2, max_ts = $3, records = $4, original_size = $5, compressed_size = $6
-    WHERE stream = $7;
-                "#,
-            )
-            .bind(stats.file_num)
-            .bind(stats.doc_time_min)
-            .bind(stats.doc_time_max)
-            .bind(stats.doc_num)
-            .bind(stats.storage_size as i64)
-            .bind(stats.compressed_size as i64)
-            .bind(stream_key)
-            .execute(&mut *tx)
-            .await{
+    SET file_num = file_num + $1, min_ts = $2, max_ts = $3, records = records + $4, original_size = original_size + $5, compressed_size = compressed_size + $6, index_size = index_size + $7
+    WHERE stream = $8;
+                "#
+                    )
+                    .bind(stats.file_num)
+                    .bind(stats.doc_time_min)
+                    .bind(stats.doc_time_max)
+                    .bind(stats.doc_num)
+                    .bind(stats.storage_size)
+                    .bind(stats.compressed_size)
+                    .bind(stats.index_size)
+                    .bind(stream_key)
+                    .execute(&mut *tx).await
+            {
                 if let Err(e) = tx.rollback().await {
                     log::error!("[POSTGRES] rollback set stream stats error: {}", e);
                 }
@@ -551,9 +844,14 @@ UPDATE stream_stats
 
     async fn reset_stream_stats(&self) -> Result<()> {
         let pool = CLIENT.clone();
-        sqlx::query(r#"UPDATE stream_stats SET file_num = 0, min_ts = 0, max_ts = 0, records = 0, original_size = 0, compressed_size = 0;"#)
-             .execute(&pool)
-            .await?;
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "stream_stats"])
+            .inc();
+        sqlx
+            ::query(
+                r#"UPDATE stream_stats SET file_num = 0, min_ts = 0, max_ts = 0, records = 0, original_size = 0, compressed_size = 0, index_size = 0;"#
+            )
+            .execute(&pool).await?;
         Ok(())
     }
 
@@ -564,16 +862,31 @@ UPDATE stream_stats
         min_ts: i64,
     ) -> Result<()> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "stream_stats"])
+            .inc();
         sqlx::query(r#"UPDATE stream_stats SET min_ts = $1 WHERE stream = $2;"#)
             .bind(min_ts)
             .bind(stream)
             .execute(&pool)
             .await?;
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "stream_stats"])
+            .inc();
+        sqlx::query(
+            r#"UPDATE stream_stats SET max_ts = min_ts WHERE stream = $1 AND max_ts < min_ts;"#,
+        )
+        .bind(stream)
+        .execute(&pool)
+        .await?;
         Ok(())
     }
 
     async fn len(&self) -> usize {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
         let ret = match sqlx::query(r#"SELECT COUNT(*)::BIGINT AS num FROM file_list;"#)
             .fetch_one(&pool)
             .await
@@ -604,27 +917,42 @@ UPDATE stream_stats
         stream_type: StreamType,
         stream: &str,
         offset: i64,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let stream_key = format!("{org_id}/{stream_type}/{stream}");
         let pool = CLIENT.clone();
-        match sqlx::query(
-            "INSERT INTO file_list_jobs (org, stream, offsets, status, node, updated_at) VALUES ($1, $2, $3, $4, '', 0) ON CONFLICT DO NOTHING;",
+        DB_QUERY_NUMS
+            .with_label_values(&["insert", "file_list_jobs"])
+            .inc();
+        match
+            sqlx
+                ::query(
+                    "INSERT INTO file_list_jobs (org, stream, offsets, status, node, started_at, updated_at) VALUES ($1, $2, $3, $4, '', 0, 0) ON CONFLICT DO NOTHING;"
+                )
+                .bind(org_id)
+                .bind(&stream_key)
+                .bind(offset)
+                .bind(super::FileListJobStatus::Pending)
+                .execute(&pool).await
+        {
+            Err(sqlx::Error::Database(e)) => if !e.is_unique_violation() {
+                return Err(Error::Message(e.to_string()));
+            }
+            Err(e) => {
+                return Err(e.into());
+            },
+            Ok(_) => {}
+        };
+
+        // get job id
+        let ret = sqlx::query(
+            "SELECT id FROM file_list_jobs WHERE org = $1 AND stream = $2 AND offsets = $3;",
         )
         .bind(org_id)
-        .bind(stream_key)
+        .bind(&stream_key)
         .bind(offset)
-        .bind(super::FileListJobStatus::Pending)
-        .execute(&pool)
-        .await
-        {
-            Err(sqlx::Error::Database(e)) => if e.is_unique_violation() {
-                Ok(())
-            } else {
-                Err(Error::Message(e.to_string()))
-            },
-            Err(e) => Err(e.into()),
-            Ok(_) => Ok(()),
-        }
+        .fetch_one(&pool)
+        .await?;
+        Ok(ret.try_get::<i64, &str>("id").unwrap_or_default())
     }
 
     async fn get_pending_jobs(&self, node: &str, limit: i64) -> Result<Vec<super::MergeJobRecord>> {
@@ -632,19 +960,23 @@ UPDATE stream_stats
         let mut tx = pool.begin().await?;
         let lock_key = "file_list_jobs:get_pending_jobs";
         let lock_id = config::utils::hash::gxhash::new().sum64(lock_key);
-        let lock_id = if lock_id > i64::MAX as u64 {
+        let lock_id = if lock_id > (i64::MAX as u64) {
             (lock_id >> 1) as i64
         } else {
             lock_id as i64
         };
         let lock_sql = format!("SELECT pg_advisory_xact_lock({lock_id})");
+        DB_QUERY_NUMS.with_label_values(&["get_lock", ""]).inc();
         if let Err(e) = sqlx::query(&lock_sql).execute(&mut *tx).await {
             if let Err(e) = tx.rollback().await {
                 log::error!("[POSTGRES] rollback get_pending_jobs error: {}", e);
             }
             return Err(e.into());
-        };
+        }
         // get pending jobs group by stream and order by num desc
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list_jobs"])
+            .inc();
         let ret = match sqlx::query_as::<_, super::MergeJobPendingRecord>(
             r#"
 SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
@@ -678,13 +1010,18 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
             return Ok(Vec::new());
         }
         let sql = format!(
-            "UPDATE file_list_jobs SET status = $1, node = $2, updated_at = $3 WHERE id IN ({});",
+            "UPDATE file_list_jobs SET status = $1, node = $2, started_at = $3, updated_at = $4 WHERE id IN ({});",
             ids.join(",")
         );
+        let now = config::utils::time::now_micros();
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list_jobs"])
+            .inc();
         if let Err(e) = sqlx::query(&sql)
             .bind(super::FileListJobStatus::Running)
             .bind(node)
-            .bind(config::utils::time::now_micros())
+            .bind(now)
+            .bind(now)
             .execute(&mut *tx)
             .await
         {
@@ -694,6 +1031,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
             return Err(e.into());
         }
         // get jobs by ids
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list_jobs"])
+            .inc();
         let sql = format!(
             "SELECT * FROM file_list_jobs WHERE id IN ({});",
             ids.join(",")
@@ -726,6 +1066,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
                 .collect::<Vec<_>>()
                 .join(",")
         );
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list_jobs"])
+            .inc();
         sqlx::query(&sql)
             .bind(super::FileListJobStatus::Pending)
             .execute(&pool)
@@ -735,6 +1078,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
 
     async fn set_job_done(&self, id: i64) -> Result<()> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list_jobs"])
+            .inc();
         sqlx::query(r#"UPDATE file_list_jobs SET status = $1, updated_at = $2 WHERE id = $3;"#)
             .bind(super::FileListJobStatus::Done)
             .bind(config::utils::time::now_micros())
@@ -746,6 +1092,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
 
     async fn update_running_jobs(&self, id: i64) -> Result<()> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list_jobs"])
+            .inc();
         sqlx::query(r#"UPDATE file_list_jobs SET updated_at = $1 WHERE id = $2;"#)
             .bind(config::utils::time::now_micros())
             .bind(id)
@@ -756,6 +1105,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
 
     async fn check_running_jobs(&self, before_date: i64) -> Result<()> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["update", "file_list_jobs"])
+            .inc();
         let ret = sqlx::query(
             r#"UPDATE file_list_jobs SET status = $1 WHERE status = $2 AND updated_at < $3;"#,
         )
@@ -772,6 +1124,9 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
 
     async fn clean_done_jobs(&self, before_date: i64) -> Result<()> {
         let pool = CLIENT.clone();
+        DB_QUERY_NUMS
+            .with_label_values(&["delete", "file_list_jobs"])
+            .inc();
         let ret =
             sqlx::query(r#"DELETE FROM file_list_jobs WHERE status = $1 AND updated_at < $2;"#)
                 .bind(super::FileListJobStatus::Done)
@@ -783,6 +1138,46 @@ SELECT stream, max(id) as id, COUNT(*)::BIGINT AS num
         }
         Ok(())
     }
+
+    async fn get_pending_jobs_count(&self) -> Result<stdHashMap<String, stdHashMap<String, i64>>> {
+        let pool = CLIENT.clone();
+
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list_jobs"])
+            .inc();
+        let ret = sqlx
+            ::query(
+                r#"SELECT stream, status, count(*) as counts FROM file_list_jobs WHERE status = $1 GROUP BY stream, status ORDER BY status desc;"#
+            )
+            .bind(super::FileListJobStatus::Pending)
+            .fetch_all(&pool).await?;
+
+        let mut job_status: stdHashMap<String, stdHashMap<String, i64>> = stdHashMap::new();
+
+        for r in ret.iter() {
+            let stream = r.get::<String, &str>("stream");
+            let status = r.get::<i32, &str>("status");
+            let counts = if status == 0 {
+                r.get::<i64, &str>("counts")
+            } else {
+                0
+            };
+            let parts: Vec<&str> = stream.split('/').collect();
+            if parts.len() >= 2 {
+                let org = parts[0].to_string();
+                let stream_type = parts[1].to_string();
+                job_status
+                    .entry(org)
+                    .or_default()
+                    .entry(stream_type)
+                    .and_modify(|e| {
+                        *e = counts;
+                    })
+                    .or_insert(counts);
+            }
+        }
+        Ok(job_status)
+    }
 }
 
 impl PostgresFileList {
@@ -791,32 +1186,38 @@ impl PostgresFileList {
         let (stream_key, date_key, file_name) =
             parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
         let org_id = stream_key[..stream_key.find('/').unwrap()].to_string();
-        match  sqlx::query(
-            format!(r#"
-INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, flattened)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        DB_QUERY_NUMS.with_label_values(&["insert", table]).inc();
+        match
+            sqlx
+                ::query(
+                    format!(
+                        r#"
+INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, index_size, flattened)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     ON CONFLICT DO NOTHING;
-            "#).as_str(),
-        )
-        .bind(org_id)
-        .bind(stream_key)
-        .bind(date_key)
-        .bind(file_name)
-        .bind(false)
-        .bind(meta.min_ts)
-        .bind(meta.max_ts)
-        .bind(meta.records)
-        .bind(meta.original_size)
-        .bind(meta.compressed_size)
-        .bind(meta.flattened)
-        .execute(&pool)
-        .await {
+            "#
+                    ).as_str()
+                )
+                .bind(org_id)
+                .bind(stream_key)
+                .bind(date_key)
+                .bind(file_name)
+                .bind(false)
+                .bind(meta.min_ts)
+                .bind(meta.max_ts)
+                .bind(meta.records)
+                .bind(meta.original_size)
+                .bind(meta.compressed_size)
+                .bind(meta.index_size)
+                .bind(meta.flattened)
+                .execute(&pool).await
+        {
             Err(sqlx::Error::Database(e)) => if e.is_unique_violation() {
-                  Ok(())
+                Ok(())
             } else {
-                  Err(Error::Message(e.to_string()))
-            },
-            Err(e) =>  Err(e.into()),
+                Err(Error::Message(e.to_string()))
+            }
+            Err(e) => Err(e.into()),
             Ok(_) => Ok(()),
         }
     }
@@ -830,7 +1231,9 @@ INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, 
         for files in chunks {
             let mut tx = pool.begin().await?;
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                format!("INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, flattened)").as_str(),
+                format!(
+                    "INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size, index_size, flattened)"
+                ).as_str()
             );
             query_builder.push_values(files, |mut b, item| {
                 let (stream_key, date_key, file_name) =
@@ -846,8 +1249,10 @@ INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, 
                     .push_bind(item.meta.records)
                     .push_bind(item.meta.original_size)
                     .push_bind(item.meta.compressed_size)
+                    .push_bind(item.meta.index_size)
                     .push_bind(item.meta.flattened);
             });
+            DB_QUERY_NUMS.with_label_values(&["insert", table]).inc();
             let need_single_insert = match query_builder.build().execute(&mut *tx).await {
                 Ok(_) => false,
                 Err(sqlx::Error::Database(e)) => {
@@ -889,59 +1294,71 @@ INSERT INTO {table} (org, stream, date, file, deleted, min_ts, max_ts, records, 
 
 pub async fn create_table() -> Result<()> {
     let pool = CLIENT.clone();
+    DB_QUERY_NUMS
+        .with_label_values(&["create", "file_list"])
+        .inc();
     sqlx::query(
         r#"
 CREATE TABLE IF NOT EXISTS file_list
 (
-    id        BIGINT GENERATED ALWAYS AS IDENTITY,
+    id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     org       VARCHAR(100) not null,
     stream    VARCHAR(256) not null,
     date      VARCHAR(16)  not null,
-    file      VARCHAR(256) not null,
+    file      VARCHAR(1024) not null,
     deleted   BOOLEAN default false not null,
     flattened BOOLEAN default false not null,
     min_ts    BIGINT not null,
     max_ts    BIGINT not null,
     records   BIGINT not null,
     original_size   BIGINT not null,
-    compressed_size BIGINT not null
+    compressed_size BIGINT not null,
+    index_size      BIGINT not null
 );
         "#,
     )
     .execute(&pool)
     .await?;
 
+    DB_QUERY_NUMS
+        .with_label_values(&["create", "file_list_history"])
+        .inc();
     sqlx::query(
         r#"
 CREATE TABLE IF NOT EXISTS file_list_history
 (
-    id        BIGINT GENERATED ALWAYS AS IDENTITY,
+    id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     org       VARCHAR(100) not null,
     stream    VARCHAR(256) not null,
     date      VARCHAR(16)  not null,
-    file      VARCHAR(256) not null,
+    file      VARCHAR(1024) not null,
     deleted   BOOLEAN default false not null,
     flattened BOOLEAN default false not null,
     min_ts    BIGINT not null,
     max_ts    BIGINT not null,
     records   BIGINT not null,
     original_size   BIGINT not null,
-    compressed_size BIGINT not null
+    compressed_size BIGINT not null,
+    index_size      BIGINT not null
 );
         "#,
     )
     .execute(&pool)
     .await?;
 
+    DB_QUERY_NUMS
+        .with_label_values(&["create", "file_list_deleted"])
+        .inc();
     sqlx::query(
         r#"
 CREATE TABLE IF NOT EXISTS file_list_deleted
 (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY,
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     org        VARCHAR(100) not null,
     stream     VARCHAR(256) not null,
     date       VARCHAR(16)  not null,
-    file       VARCHAR(256) not null,
+    file       VARCHAR(1024) not null,
+    index_file BOOLEAN default false not null,
     flattened  BOOLEAN default false not null,
     created_at BIGINT not null
 );
@@ -950,16 +1367,20 @@ CREATE TABLE IF NOT EXISTS file_list_deleted
     .execute(&pool)
     .await?;
 
+    DB_QUERY_NUMS
+        .with_label_values(&["create", "file_list_jobs"])
+        .inc();
     sqlx::query(
         r#"
 CREATE TABLE IF NOT EXISTS file_list_jobs
 (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY,
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     org        VARCHAR(100) not null,
     stream     VARCHAR(256) not null,
     offsets    BIGINT not null,
     status     INT not null,
     node       VARCHAR(100) not null,
+    started_at BIGINT not null,
     updated_at BIGINT not null
 );
         "#,
@@ -967,11 +1388,14 @@ CREATE TABLE IF NOT EXISTS file_list_jobs
     .execute(&pool)
     .await?;
 
+    DB_QUERY_NUMS
+        .with_label_values(&["create", "stream_stats"])
+        .inc();
     sqlx::query(
         r#"
 CREATE TABLE IF NOT EXISTS stream_stats
 (
-    id       BIGINT GENERATED ALWAYS AS IDENTITY,
+    id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     org      VARCHAR(100) not null,
     stream   VARCHAR(256) not null,
     file_num BIGINT not null,
@@ -979,7 +1403,8 @@ CREATE TABLE IF NOT EXISTS stream_stats
     max_ts   BIGINT not null,
     records  BIGINT not null,
     original_size   BIGINT not null,
-    compressed_size BIGINT not null
+    compressed_size BIGINT not null,
+    index_size      BIGINT not null
 );
         "#,
     )
@@ -987,89 +1412,125 @@ CREATE TABLE IF NOT EXISTS stream_stats
     .await?;
 
     // create column flattened for old version <= 0.10.5
-    add_column_flattened("file_list").await?;
-    add_column_flattened("file_list_history").await?;
-    add_column_flattened("file_list_deleted").await?;
+    let column = "flattened";
+    let data_type = "BOOLEAN default false not null";
+    add_column("file_list", column, data_type).await?;
+    add_column("file_list_history", column, data_type).await?;
+    add_column("file_list_deleted", column, data_type).await?;
+
+    // create column started_at for old version <= 0.10.8
+    let column = "started_at";
+    let data_type = "BIGINT default 0 not null";
+    add_column("file_list_jobs", column, data_type).await?;
+
+    // create column index_size for old version <= 0.13.1
+    let column = "index_size";
+    let data_type = "BIGINT default 0 not null";
+    add_column("file_list", column, data_type).await?;
+    add_column("file_list_history", column, data_type).await?;
+    add_column("stream_stats", column, data_type).await?;
+    let column = "index_file";
+    let data_type = "BOOLEAN default false not null";
+    add_column("file_list_deleted", column, data_type).await?;
 
     Ok(())
 }
 
 pub async fn create_table_index() -> Result<()> {
     let pool = CLIENT.clone();
-    let sqls = vec![
+
+    let indices: Vec<(&str, &str, &[&str])> = vec![
+        ("file_list_org_idx", "file_list", &["org"]),
         (
+            "file_list_stream_ts_idx",
             "file_list",
-            "CREATE INDEX IF NOT EXISTS file_list_org_idx on file_list (org);",
+            &["stream", "max_ts", "min_ts"],
         ),
+        ("file_list_history_org_idx", "file_list_history", &["org"]),
         (
-            "file_list",
-            "CREATE INDEX IF NOT EXISTS file_list_stream_ts_idx on file_list (stream, max_ts, min_ts);",
-        ),
-        (
+            "file_list_history_stream_ts_idx",
             "file_list_history",
-            "CREATE INDEX IF NOT EXISTS file_list_history_org_idx on file_list_history (org);",
+            &["stream", "max_ts", "min_ts"],
         ),
         (
-            "file_list_history",
-            "CREATE INDEX IF NOT EXISTS file_list_history_stream_ts_idx on file_list_history (stream, max_ts, min_ts);",
-        ),
-        (
-            "file_list_history",
-            "CREATE UNIQUE INDEX IF NOT EXISTS file_list_history_stream_file_idx on file_list_history (stream, date, file);",
-        ),
-        (
+            "file_list_deleted_created_at_idx",
             "file_list_deleted",
-            "CREATE INDEX IF NOT EXISTS file_list_deleted_created_at_idx on file_list_deleted (org, created_at);",
+            &["org", "created_at"],
         ),
         (
+            "file_list_deleted_stream_date_file_idx",
             "file_list_deleted",
-            "CREATE INDEX IF NOT EXISTS file_list_deleted_stream_date_file_idx on file_list_deleted (stream, date, file);",
+            &["stream", "date", "file"],
         ),
         (
+            "file_list_jobs_stream_status_idx",
             "file_list_jobs",
-            "CREATE UNIQUE INDEX IF NOT EXISTS file_list_jobs_stream_offsets_idx on file_list_jobs (stream, offsets);",
+            &["status", "stream"],
         ),
-        (
-            "file_list_jobs",
-            "CREATE INDEX IF NOT EXISTS file_list_jobs_stream_status_idx on file_list_jobs (status, stream);",
-        ),
-        (
-            "stream_stats",
-            "CREATE INDEX IF NOT EXISTS stream_stats_org_idx on stream_stats (org);",
-        ),
-        (
-            "stream_stats",
-            "CREATE UNIQUE INDEX IF NOT EXISTS stream_stats_stream_idx on stream_stats (stream);",
-        ),
+        ("stream_stats_org_idx", "stream_stats", &["org"]),
     ];
-    for (table, sql) in sqls {
-        if let Err(e) = sqlx::query(sql).execute(&pool).await {
-            log::error!("[POSTGRES] create table {} index error: {}", table, e);
-            return Err(e.into());
-        }
+    for (idx, table, fields) in indices {
+        create_index(IndexStatement::new(idx, table, false, fields)).await?;
     }
 
-    // create UNIQUE index for file_list
-    let unique_index_sql = r#"CREATE UNIQUE INDEX IF NOT EXISTS file_list_stream_file_idx on file_list (stream, date, file);"#;
-    if let Err(e) = sqlx::query(unique_index_sql).execute(&pool).await {
+    let unique_indices: Vec<(&str, &str, &[&str])> = vec![
+        (
+            "file_list_history_stream_file_idx",
+            "file_list_history",
+            &["stream", "date", "file"],
+        ),
+        (
+            "file_list_jobs_stream_offsets_idx",
+            "file_list_jobs",
+            &["stream", "offsets"],
+        ),
+        ("stream_stats_stream_idx", "stream_stats", &["stream"]),
+    ];
+    for (idx, table, fields) in unique_indices {
+        create_index(IndexStatement::new(idx, table, true, fields)).await?;
+    }
+
+    // This is a case where we want to MAKE the index unique if it isn't
+    let res = create_index(IndexStatement::new(
+        "file_list_stream_file_idx",
+        "file_list",
+        true,
+        &["stream", "date", "file"],
+    ))
+    .await;
+    if let Err(e) = res {
         if !e.to_string().contains("could not create unique index") {
-            return Err(e.into());
+            return Err(e);
         }
         // delete duplicate records
         log::warn!("[POSTGRES] starting delete duplicate records");
-        let ret = sqlx::query(
-                r#"SELECT stream, date, file, min(id) as id FROM file_list GROUP BY stream, date, file HAVING COUNT(*) > 1;"#,
-            ).fetch_all(&pool).await?;
+        DB_QUERY_NUMS
+            .with_label_values(&["select", "file_list"])
+            .inc();
+        let ret = sqlx
+            ::query(
+                r#"SELECT stream, date, file, min(id) as id FROM file_list GROUP BY stream, date, file HAVING COUNT(*) > 1;"#
+            )
+            .fetch_all(&pool).await?;
         log::warn!("[POSTGRES] total: {} duplicate records", ret.len());
         for (i, r) in ret.iter().enumerate() {
             let stream = r.get::<String, &str>("stream");
             let date = r.get::<String, &str>("date");
             let file = r.get::<String, &str>("file");
             let id = r.get::<i64, &str>("id");
-            sqlx::query(
-                    r#"DELETE FROM file_list WHERE id != $1 AND stream = $2 AND date = $3 AND file = $4;"#,
-                ).bind(id).bind(stream).bind(date).bind(file).execute(&pool).await?;
-            if i / 1000 == 0 {
+            DB_QUERY_NUMS
+                .with_label_values(&["delete", "file_list"])
+                .inc();
+            sqlx
+                ::query(
+                    r#"DELETE FROM file_list WHERE id != $1 AND stream = $2 AND date = $3 AND file = $4;"#
+                )
+                .bind(id)
+                .bind(stream)
+                .bind(date)
+                .bind(file)
+                .execute(&pool).await?;
+            if i % 1000 == 0 {
                 log::warn!("[POSTGRES] delete duplicate records: {}/{}", i, ret.len());
             }
         }
@@ -1079,16 +1540,24 @@ pub async fn create_table_index() -> Result<()> {
             ret.len()
         );
         // create index again
-        sqlx::query(unique_index_sql).execute(&pool).await?;
-        log::warn!("[POSTGRES] create table index(file_list_stream_file_idx) succeed");
+        create_index(IndexStatement::new(
+            "file_list_stream_file_idx",
+            "file_list",
+            true,
+            &["stream", "date", "file"],
+        ))
+        .await?;
+        log::warn!("[POSTGRES] create table index(file_list_stream_file_idx) successfully");
     }
 
     Ok(())
 }
 
-async fn add_column_flattened(table: &str) -> Result<()> {
+async fn add_column(table: &str, column: &str, data_type: &str) -> Result<()> {
     let pool = CLIENT.clone();
-    let column = "flattened";
+    DB_QUERY_NUMS
+        .with_label_values(&["select", "information_schema.columns"])
+        .inc();
     let check_sql = format!(
         "SELECT count(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='{table}' AND column_name='{column}';"
     );
@@ -1099,9 +1568,8 @@ async fn add_column_flattened(table: &str) -> Result<()> {
         return Ok(());
     }
 
-    let alert_sql = format!(
-        "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} BOOLEAN default false not null;"
-    );
+    DB_QUERY_NUMS.with_label_values(&["alter", table]).inc();
+    let alert_sql = format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {data_type};");
     let mut tx = pool.begin().await?;
     if let Err(e) = sqlx::query(&alert_sql).execute(&mut *tx).await {
         log::error!("[POSTGRES] Error in adding column {column}: {}", e);
@@ -1113,6 +1581,6 @@ async fn add_column_flattened(table: &str) -> Result<()> {
     if let Err(e) = tx.commit().await {
         log::info!("[POSTGRES] Error in committing transaction: {}", e);
         return Err(e.into());
-    };
+    }
     Ok(())
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,10 +21,10 @@ fn wal() {
     let entry_num = 100;
     let dir = tempdir().unwrap();
     let dir = dir.path();
-    let mut writer = Writer::new(dir, "org", "stream", 1, 1024_1024).unwrap();
+    let mut writer = Writer::new(dir, "org", "stream", 1, 1024_1024, 8 * 1024).unwrap();
     for i in 0..entry_num {
         let data = format!("hello world {}", i);
-        writer.write(data.as_bytes(), true).unwrap();
+        writer.write(data.as_bytes()).unwrap();
     }
     writer.close().unwrap();
 

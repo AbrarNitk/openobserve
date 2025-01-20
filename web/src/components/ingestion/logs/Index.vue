@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -90,30 +90,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           content-class="tab_content"
         />
         <q-route-tab
-          name="kinesisfirehose"
-          :to="{
-            name: 'kinesisfirehose',
-            query: {
-              org_identifier: store.state.selectedOrganization.identifier,
-            },
-          }"
-          :icon="'img:' + getImageURL('images/ingestion/kinesis_firehose.svg')"
-          label="Kinesis Firehose"
-          content-class="tab_content"
-        />
-        <q-route-tab
-          name="gcpLogs"
-          :to="{
-            name: 'gcpLogs',
-            query: {
-              org_identifier: store.state.selectedOrganization.identifier,
-            },
-          }"
-          :icon="'img:' + getImageURL('images/ingestion/gcp.svg')"
-          label="GCP Logs via (Pub/Sub)"
-          content-class="tab_content"
-        />
-        <q-route-tab
           name="ingestLogsFromOtel"
           :to="{
             name: 'ingestLogsFromOtel',
@@ -123,6 +99,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           }"
           :icon="'img:' + getImageURL('images/ingestion/otlp.svg')"
           label="OTEL Collector"
+          content-class="tab_content"
+        />
+        <q-route-tab
+          name="logstash"
+          :to="{
+            name: 'logstash',
+            query: {
+              org_identifier: store.state.selectedOrganization.identifier,
+            },
+          }"
+          :icon="'img:' + getImageURL('images/ingestion/logstash.svg')"
+          label="Logstash"
           content-class="tab_content"
         />
         <q-route-tab
@@ -194,16 +182,14 @@ export default defineComponent({
     const confirmUpdate = ref<boolean>(false);
     const ingestiontabs = ref("");
     const currentOrgIdentifier: any = ref(
-      store.state.selectedOrganization.identifier
+      store.state.selectedOrganization.identifier,
     );
     const ingestRoutes = [
       "curl",
       "fluentbit",
       "fluentd",
-      "kinesisfirehose",
       "vector",
       "syslog",
-      "gcpLogs",
       "syslogNg",
     ];
 

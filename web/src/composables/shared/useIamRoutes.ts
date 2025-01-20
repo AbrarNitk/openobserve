@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import config from "@/aws-exports";
+import ServiceAccountsList from "@/components/iam/serviceAccounts/ServiceAccountsList.vue";
 import { routeGuard } from "@/utils/zincutils";
 
 const IdentityAccessManagement = () =>
@@ -46,6 +47,14 @@ const useEnterpriseRoutes = () => {
           path: "users",
           name: "users",
           component: Users,
+          beforeEnter(to: any, from: any, next: any) {
+            routeGuard(to, from, next);
+          },
+        },
+        {
+          path: "serviceAccounts",
+          name: "serviceAccounts",
+          component: ServiceAccountsList,
           beforeEnter(to: any, from: any, next: any) {
             routeGuard(to, from, next);
           },

@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -29,7 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       method: filterEntities,
     }"
   >
-    <template v-slot:permission="slotProps">
+    <template v-slot:permission="slotProps: any">
       <q-checkbox
         v-show="slotProps.column.row.permission[slotProps.columnName].show"
         size="xs"
@@ -163,7 +163,7 @@ const updateTableData = () => {
   } else {
     rows.value = getResourceEntities().filter((entity: Entity) => {
       const showEntity = Object.values(entity.permission).some(
-        (permission: any) => permission
+        (permission: any) => permission,
       );
 
       return showEntity;
@@ -182,12 +182,11 @@ watch(
   },
   {
     immediate: true,
-  }
+  },
 );
 
 const filterEntities = (rows: Entity[], terms: string) => {
   var filtered = [];
-  console.log("entity", rows, terms);
   terms = terms.toLowerCase();
   for (var i = 0; i < rows.length; i++) {
     if (rows[i]["name"].toLowerCase().includes(terms)) {

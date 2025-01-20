@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -40,11 +40,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     >
       <div class="col">
         <div data-test="dashboard-error">
-          <ul>
+          <ul class="tw-list-disc tw-list-inside tw-px-3">
             <li
               v-for="(item, index) in props.errors.errors"
               :key="index"
               style="color: red"
+              class="tw-py-1"
             >
               {{ item }}
             </li>

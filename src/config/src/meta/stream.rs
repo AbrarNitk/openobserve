@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,16 +15,16 @@
 
 use std::{cmp::max, fmt::Display};
 
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::Duration;
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use hashbrown::HashMap;
 use proto::cluster_rpc;
 use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 use utoipa::ToSchema;
 
-use super::usage::Stats;
+use super::bitvec::BitVec;
 use crate::{
     get_config,
+    meta::self_reporting::usage::Stats,
     utils::{
         hash::{gxhash, Sum64},
         json::{self, Map, Value},
@@ -56,18 +56,45 @@ pub enum StreamType {
     Index,
 }
 
+impl StreamType {
+    pub fn is_basic_type(&self) -> bool {
+        matches!(
+            *self,
+            StreamType::Logs | StreamType::Metrics | StreamType::Traces
+        )
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            StreamType::Logs => "logs",
+            StreamType::Metrics => "metrics",
+            StreamType::Traces => "traces",
+            StreamType::EnrichmentTables => "enrichment_tables",
+            StreamType::Filelist => "file_list",
+            StreamType::Metadata => "metadata",
+            StreamType::Index => "index",
+        }
+    }
+}
+
 impl From<&str> for StreamType {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "logs" => StreamType::Logs,
             "metrics" => StreamType::Metrics,
             "traces" => StreamType::Traces,
-            "enrichment_tables" => StreamType::EnrichmentTables,
+            "enrichment_tables" | "enrich" => StreamType::EnrichmentTables,
             "file_list" => StreamType::Filelist,
             "metadata" => StreamType::Metadata,
             "index" => StreamType::Index,
             _ => StreamType::Logs,
         }
+    }
+}
+
+impl From<String> for StreamType {
+    fn from(s: String) -> Self {
+        StreamType::from(s.as_str())
     }
 }
 
@@ -85,11 +112,59 @@ impl std::fmt::Display for StreamType {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(default)]
+pub struct StreamParams {
+    pub org_id: faststr::FastStr,
+    pub stream_name: faststr::FastStr,
+    pub stream_type: StreamType,
+}
+
+impl Default for StreamParams {
+    fn default() -> Self {
+        Self {
+            org_id: String::default().into(),
+            stream_name: String::default().into(),
+            stream_type: StreamType::default(),
+        }
+    }
+}
+
+impl std::fmt::Display for StreamParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}",
+            self.org_id, self.stream_name, self.stream_type
+        )
+    }
+}
+
+impl StreamParams {
+    pub fn new(org_id: &str, stream_name: &str, stream_type: StreamType) -> Self {
+        Self {
+            org_id: org_id.to_string().into(),
+            stream_name: stream_name.to_string().into(),
+            stream_type,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !(self.org_id.is_empty() || self.stream_name.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ListStreamParams {
+    pub list: Vec<StreamParams>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileKey {
     pub key: String,
     pub meta: FileMeta,
     pub deleted: bool,
+    pub segment_ids: Option<BitVec>,
 }
 
 impl FileKey {
@@ -98,6 +173,7 @@ impl FileKey {
             key: key.to_string(),
             meta,
             deleted,
+            segment_ids: None,
         }
     }
 
@@ -106,7 +182,12 @@ impl FileKey {
             key: file.to_string(),
             meta: FileMeta::default(),
             deleted: false,
+            segment_ids: None,
         }
+    }
+
+    pub fn with_segment_ids(&mut self, segment_ids: BitVec) {
+        self.segment_ids = Some(segment_ids);
     }
 }
 
@@ -117,50 +198,13 @@ pub struct FileMeta {
     pub records: i64,
     pub original_size: i64,
     pub compressed_size: i64,
+    pub index_size: i64,
     pub flattened: bool,
 }
 
 impl FileMeta {
     pub fn is_empty(&self) -> bool {
         self.records == 0 && self.original_size == 0
-    }
-}
-
-impl From<&FileMeta> for Vec<u8> {
-    fn from(value: &FileMeta) -> Vec<u8> {
-        let mut bytes = [0; 40];
-        LittleEndian::write_i64(&mut bytes[0..8], value.min_ts);
-        LittleEndian::write_i64(&mut bytes[8..16], value.max_ts);
-        LittleEndian::write_i64(&mut bytes[16..24], value.records);
-        LittleEndian::write_i64(&mut bytes[24..32], value.original_size);
-        LittleEndian::write_i64(&mut bytes[32..40], value.compressed_size);
-        bytes.to_vec()
-    }
-}
-
-impl TryFrom<&[u8]> for FileMeta {
-    type Error = std::io::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < 40 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Invalid FileMeta",
-            ));
-        }
-        let min_ts = LittleEndian::read_i64(&value[0..8]);
-        let max_ts = LittleEndian::read_i64(&value[8..16]);
-        let records = LittleEndian::read_i64(&value[16..24]);
-        let original_size = LittleEndian::read_i64(&value[24..32]);
-        let compressed_size = LittleEndian::read_i64(&value[32..40]);
-        Ok(Self {
-            min_ts,
-            max_ts,
-            records,
-            original_size,
-            compressed_size,
-            flattened: false,
-        })
     }
 }
 
@@ -183,6 +227,13 @@ impl From<&[parquet::file::metadata::KeyValue]> for FileMeta {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct FileListDeleted {
+    pub file: String,
+    pub index_file: bool,
+    pub flattened: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryPartitionStrategy {
     FileNum,
@@ -201,7 +252,23 @@ impl From<&String> for QueryPartitionStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeStrategy {
+    FileSize,
+    FileTime,
+}
+
+impl From<&String> for MergeStrategy {
+    fn from(s: &String) -> Self {
+        match s.to_lowercase().as_str() {
+            "file_size" => MergeStrategy::FileSize,
+            "file_time" => MergeStrategy::FileTime,
+            _ => MergeStrategy::FileSize,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct StreamStats {
     pub created_at: i64,
     pub doc_time_min: i64,
@@ -210,6 +277,7 @@ pub struct StreamStats {
     pub file_num: i64,
     pub storage_size: f64,
     pub compressed_size: f64,
+    pub index_size: f64,
 }
 
 impl StreamStats {
@@ -248,6 +316,7 @@ impl StreamStats {
         self.doc_time_max = self.doc_time_max.max(meta.max_ts);
         self.storage_size += meta.original_size as f64;
         self.compressed_size += meta.compressed_size as f64;
+        self.index_size += meta.index_size as f64;
         if self.doc_time_min == 0 {
             self.doc_time_min = meta.min_ts;
         }
@@ -257,23 +326,21 @@ impl StreamStats {
         if self.compressed_size < 0.0 {
             self.compressed_size = 0.0;
         }
+        if self.index_size < 0.0 {
+            self.index_size = 0.0;
+        }
     }
 
-    pub fn add_stream_stats(&mut self, stats: &StreamStats) {
-        self.file_num = max(0, self.file_num + stats.file_num);
-        self.doc_num = max(0, self.doc_num + stats.doc_num);
+    pub fn format_by(&mut self, stats: &StreamStats) {
+        self.file_num = stats.file_num;
+        self.doc_num = stats.doc_num;
+        self.storage_size = stats.storage_size;
+        self.compressed_size = stats.compressed_size;
+        self.index_size = stats.index_size;
         self.doc_time_min = self.doc_time_min.min(stats.doc_time_min);
         self.doc_time_max = self.doc_time_max.max(stats.doc_time_max);
-        self.storage_size += stats.storage_size;
-        self.compressed_size += stats.compressed_size;
         if self.doc_time_min == 0 {
             self.doc_time_min = stats.doc_time_min;
-        }
-        if self.storage_size < 0.0 {
-            self.storage_size = 0.0;
-        }
-        if self.compressed_size < 0.0 {
-            self.compressed_size = 0.0;
         }
     }
 }
@@ -306,6 +373,7 @@ impl From<Stats> for StreamStats {
             file_num: 0,
             storage_size: meta.original_size,
             compressed_size: meta.compressed_size.unwrap_or_default(),
+            index_size: meta.index_size.unwrap_or_default(),
         }
     }
 }
@@ -322,6 +390,7 @@ impl std::ops::Sub<FileMeta> for StreamStats {
             doc_time_max: self.doc_time_max.max(rhs.max_ts),
             storage_size: self.storage_size - rhs.original_size as f64,
             compressed_size: self.compressed_size - rhs.compressed_size as f64,
+            index_size: self.index_size - rhs.index_size as f64,
         };
         if ret.doc_time_min == 0 {
             ret.doc_time_min = rhs.min_ts;
@@ -338,6 +407,7 @@ impl From<&FileMeta> for cluster_rpc::FileMeta {
             records: req.records,
             original_size: req.original_size,
             compressed_size: req.compressed_size,
+            index_size: req.index_size,
         }
     }
 }
@@ -351,6 +421,7 @@ impl From<&cluster_rpc::FileMeta> for FileMeta {
             original_size: req.original_size,
             compressed_size: req.compressed_size,
             flattened: false,
+            index_size: req.index_size,
         }
     }
 }
@@ -361,6 +432,7 @@ impl From<&FileKey> for cluster_rpc::FileKey {
             key: req.key.clone(),
             meta: Some(cluster_rpc::FileMeta::from(&req.meta)),
             deleted: req.deleted,
+            segment_ids: None,
         }
     }
 }
@@ -371,6 +443,7 @@ impl From<&cluster_rpc::FileKey> for FileKey {
             key: req.key.clone(),
             meta: FileMeta::from(req.meta.as_ref().unwrap()),
             deleted: req.deleted,
+            segment_ids: None,
         }
     }
 }
@@ -416,15 +489,150 @@ impl std::fmt::Display for PartitionTimeLevel {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, ToSchema)]
-pub struct StreamSettings {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+pub struct UpdateSettingsWrapper<D> {
     #[serde(default)]
-    pub partition_keys: Vec<StreamPartition>,
+    pub add: Vec<D>,
+    #[serde(default)]
+    pub remove: Vec<D>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+pub struct UpdateStreamSettings {
     #[serde(skip_serializing_if = "Option::None")]
     pub partition_time_level: Option<PartitionTimeLevel>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
+    pub partition_keys: UpdateSettingsWrapper<StreamPartition>,
+    #[serde(default)]
+    pub full_text_search_keys: UpdateSettingsWrapper<String>,
+    #[serde(default)]
+    pub index_fields: UpdateSettingsWrapper<String>,
+    #[serde(default)]
+    pub bloom_filter_fields: UpdateSettingsWrapper<String>,
+    #[serde(skip_serializing_if = "Option::None")]
+    #[serde(default)]
+    pub data_retention: Option<i64>,
+    #[serde(skip_serializing_if = "Option::None")]
+    #[serde(default)]
+    pub flatten_level: Option<i64>,
+    #[serde(default)]
+    pub defined_schema_fields: UpdateSettingsWrapper<String>,
+    #[serde(default)]
+    pub distinct_value_fields: UpdateSettingsWrapper<String>,
+    #[serde(default)]
+    pub max_query_range: Option<i64>,
+    #[serde(default)]
+    pub store_original_data: Option<bool>,
+    #[serde(default)]
+    pub approx_partition: Option<bool>,
+    #[serde(default)]
+    pub extended_retention_days: UpdateSettingsWrapper<TimeRange>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+/// WARNING: this implements Eq trait based only on the name,
+/// so the timestamp will not be considered when comparing two entries
+pub struct DistinctField {
+    pub name: String,
+    pub added_ts: i64,
+}
+
+impl PartialEq for DistinctField {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for DistinctField {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct TimeRange {
+    /// Start timestamp in microseconds
+    pub start: i64,
+    /// End timestamp in microseconds
+    pub end: i64,
+}
+
+impl Display for TimeRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let time_range_start: DateTime<Utc> = Utc.timestamp_nanos(self.start * 1000);
+        let time_range_end: DateTime<Utc> = Utc.timestamp_nanos(self.end * 1000);
+        write!(f, "{} to {}", time_range_start, time_range_end)
+    }
+}
+impl TimeRange {
+    pub fn new(start: i64, end: i64) -> Self {
+        Self { start, end }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.start == 0 && self.end == 0
+    }
+
+    pub fn contains(&self, other: &Self) -> bool {
+        self.start <= other.start && self.end >= other.end
+    }
+
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.start < other.end && self.end > other.start
+    }
+
+    /// Returns the intersection of two time ranges
+    /// If the time ranges do not intersect, returns nothing
+    /// If the time ranges intersect, returns the inverse of the intersection
+    pub fn split_by_range(&self, other: &Self) -> anyhow::Result<(Option<Self>, Option<Self>)> {
+        let mut left = None;
+        let mut right = None;
+
+        if self == other {
+            return Ok((left, right));
+        }
+
+        if !self.intersects(other) {
+            return Err(anyhow::anyhow!("Time ranges do not intersect"));
+        }
+
+        if self.start < other.start {
+            left = Some(Self::new(self.start, other.start));
+        }
+        if self.end > other.end {
+            right = Some(Self::new(other.end, self.end));
+        }
+        Ok((left, right))
+    }
+
+    pub fn flatten_overlapping_ranges(ranges: Vec<Self>) -> Vec<Self> {
+        if ranges.is_empty() {
+            return ranges;
+        }
+        let mut ranges = ranges;
+        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+        let mut result = Vec::new();
+        let mut current = ranges[0].clone();
+        for range in ranges.iter().skip(1) {
+            if current.intersects(range) {
+                current.end = range.end;
+            } else {
+                result.push(current.clone());
+                current = range.clone();
+            }
+        }
+        result.push(current);
+        result
+    }
+}
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+pub struct StreamSettings {
+    #[serde(skip_serializing_if = "Option::None")]
+    pub partition_time_level: Option<PartitionTimeLevel>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub partition_keys: Vec<StreamPartition>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub full_text_search_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub index_fields: Vec<String>,
     #[serde(default)]
     pub bloom_filter_fields: Vec<String>,
     #[serde(default)]
@@ -434,7 +642,18 @@ pub struct StreamSettings {
     #[serde(skip_serializing_if = "Option::None")]
     pub defined_schema_fields: Option<Vec<String>>,
     #[serde(default)]
-    pub max_query_range: i64,
+    pub max_query_range: i64, // hours
+    #[serde(default)]
+    pub store_original_data: bool,
+    #[serde(default)]
+    pub approx_partition: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub distinct_value_fields: Vec<DistinctField>,
+    #[serde(default)]
+    pub index_updated_at: i64,
+    #[serde(default)]
+    pub extended_retention_days: Vec<TimeRange>,
 }
 
 impl Serialize for StreamSettings {
@@ -447,15 +666,21 @@ impl Serialize for StreamSettings {
         for (index, key) in self.partition_keys.iter().enumerate() {
             part_keys.insert(format!("L{index}"), key);
         }
-        state.serialize_field("partition_keys", &part_keys)?;
         state.serialize_field(
             "partition_time_level",
             &self.partition_time_level.unwrap_or_default(),
         )?;
+        state.serialize_field("partition_keys", &part_keys)?;
         state.serialize_field("full_text_search_keys", &self.full_text_search_keys)?;
+        state.serialize_field("index_fields", &self.index_fields)?;
         state.serialize_field("bloom_filter_fields", &self.bloom_filter_fields)?;
+        state.serialize_field("distinct_value_fields", &self.distinct_value_fields)?;
         state.serialize_field("data_retention", &self.data_retention)?;
         state.serialize_field("max_query_range", &self.max_query_range)?;
+        state.serialize_field("store_original_data", &self.store_original_data)?;
+        state.serialize_field("approx_partition", &self.approx_partition)?;
+        state.serialize_field("index_updated_at", &self.index_updated_at)?;
+        state.serialize_field("extended_retention_days", &self.extended_retention_days)?;
 
         match self.defined_schema_fields.as_ref() {
             Some(fields) => {
@@ -510,17 +735,26 @@ impl From<&str> for StreamSettings {
         }
 
         let mut full_text_search_keys = Vec::new();
-        let fts = settings.get("full_text_search_keys");
-        if let Some(value) = fts {
+        let fields = settings.get("full_text_search_keys");
+        if let Some(value) = fields {
             let v: Vec<_> = value.as_array().unwrap().iter().collect();
             for item in v {
                 full_text_search_keys.push(item.as_str().unwrap().to_string())
             }
         }
 
+        let mut index_fields = Vec::new();
+        let fields = settings.get("index_fields");
+        if let Some(value) = fields {
+            let v: Vec<_> = value.as_array().unwrap().iter().collect();
+            for item in v {
+                index_fields.push(item.as_str().unwrap().to_string())
+            }
+        }
+
         let mut bloom_filter_fields = Vec::new();
-        let fts = settings.get("bloom_filter_fields");
-        if let Some(value) = fts {
+        let fields = settings.get("bloom_filter_fields");
+        if let Some(value) = fields {
             let v: Vec<_> = value.as_array().unwrap().iter().collect();
             for item in v {
                 bloom_filter_fields.push(item.as_str().unwrap().to_string())
@@ -552,15 +786,60 @@ impl From<&str> for StreamSettings {
 
         let flatten_level = settings.get("flatten_level").map(|v| v.as_i64().unwrap());
 
+        let store_original_data = settings
+            .get("store_original_data")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let approx_partition = settings
+            .get("approx_partition")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let mut distinct_value_fields = Vec::new();
+        let fields = settings.get("distinct_value_fields");
+        if let Some(value) = fields {
+            let v: Vec<_> = value.as_array().unwrap().iter().collect();
+            for item in v {
+                distinct_value_fields.push(json::from_value(item.clone()).unwrap())
+            }
+        }
+
+        let index_updated_at = settings
+            .get("index_updated_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default();
+
+        let mut extended_retention_days = vec![];
+        if let Some(values) = settings
+            .get("extended_retention_days")
+            .and_then(|v| v.as_array())
+        {
+            for item in values {
+                let start = item
+                    .get("start")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_default();
+                let end = item.get("end").and_then(|v| v.as_i64()).unwrap_or_default();
+                extended_retention_days.push(TimeRange::new(start, end));
+            }
+        }
+
         Self {
-            partition_keys,
             partition_time_level,
+            partition_keys,
             full_text_search_keys,
+            index_fields,
             bloom_filter_fields,
             data_retention,
             max_query_range,
             flatten_level,
             defined_schema_fields,
+            store_original_data,
+            approx_partition,
+            distinct_value_fields,
+            index_updated_at,
+            extended_retention_days,
         }
     }
 }
@@ -591,18 +870,37 @@ impl StreamPartition {
         }
     }
 
+    pub fn new_prefix(field: &str) -> Self {
+        Self {
+            field: field.to_string(),
+            types: StreamPartitionType::Prefix,
+            disabled: false,
+        }
+    }
+
     pub fn get_partition_key(&self, value: &str) -> String {
         format!("{}={}", self.field, self.get_partition_value(value))
     }
 
     pub fn get_partition_value(&self, value: &str) -> String {
-        match &self.types {
+        let val = match &self.types {
             StreamPartitionType::Value => value.to_string(),
             StreamPartitionType::Hash(n) => {
                 let h = gxhash::new().sum64(value);
                 let bucket = h % n;
                 bucket.to_string()
             }
+            StreamPartitionType::Prefix => value
+                .to_ascii_lowercase()
+                .chars()
+                .next()
+                .unwrap_or('_')
+                .to_string(),
+        };
+        if val.is_ascii() {
+            val
+        } else {
+            urlencoding::encode(&val).into_owned()
         }
     }
 }
@@ -613,6 +911,7 @@ pub enum StreamPartitionType {
     #[default]
     Value, // each value is a partition
     Hash(u64), // partition with fixed bucket size by hash
+    Prefix,    // partition by first letter of term
 }
 
 impl Display for StreamPartitionType {
@@ -620,6 +919,7 @@ impl Display for StreamPartitionType {
         match self {
             StreamPartitionType::Value => write!(f, "value"),
             StreamPartitionType::Hash(_) => write!(f, "hash"),
+            StreamPartitionType::Prefix => write!(f, "prefix"),
         }
     }
 }
@@ -629,11 +929,6 @@ impl Display for StreamPartitionType {
 pub struct PartitioningDetails {
     pub partition_keys: Vec<StreamPartition>,
     pub partition_time_level: Option<PartitionTimeLevel>,
-}
-
-pub struct Routing {
-    pub destination: String,
-    pub routing: Vec<RoutingCondition>,
 }
 
 // Code Duplicated from alerts
@@ -648,17 +943,18 @@ pub struct RoutingCondition {
 }
 // Code Duplicated from alerts
 impl RoutingCondition {
-    pub async fn evaluate(&self, row: &Map<String, Value>) -> bool {
+    pub fn evaluate(&self, row: &Map<String, Value>) -> bool {
         let val = match row.get(&self.column) {
             Some(val) => val,
             None => {
+                // field not found -> dropped
                 return false;
             }
         };
         match val {
             Value::String(v) => {
                 let val = v.as_str();
-                let con_val = self.value.as_str().unwrap_or_default();
+                let con_val = self.value.as_str().unwrap_or_default().trim_matches('"'); // "" is interpreted as empty string
                 match self.operator {
                     Operator::EqualTo => val == con_val,
                     Operator::NotEqualTo => val != con_val,
@@ -707,6 +1003,10 @@ impl RoutingCondition {
                     Operator::NotEqualTo => val != con_val,
                     _ => false,
                 }
+            }
+            Value::Null => {
+                matches!(self.operator, Operator::EqualTo)
+                    && matches!(&self.value, Value::String(v) if v == "null")
             }
             _ => false,
         }
@@ -765,6 +1065,7 @@ mod tests {
             original_size: 10,
             compressed_size: 1,
             flattened: false,
+            index_size: 0,
         };
 
         let rpc_meta = cluster_rpc::FileMeta::from(&file_meta);
@@ -828,5 +1129,70 @@ mod tests {
         assert_eq!(part.get_partition_key("test1"), "field=25");
         assert_eq!(part.get_partition_key("test2"), "field=4");
         assert_eq!(part.get_partition_key("test3"), "field=2");
+    }
+
+    #[test]
+    fn test_stream_params() {
+        let params = StreamParams::new("org_id", "stream_name", StreamType::Logs);
+        let param2 = StreamParams::new("org_id", "stream_name", StreamType::Logs);
+        let param3 = StreamParams::new("org_id", "stream_name", StreamType::Index);
+        assert_eq!(params.org_id, "org_id");
+        assert_eq!(params.stream_name, "stream_name");
+        assert_eq!(params.stream_type, StreamType::Logs);
+        let mut map = HashMap::new();
+        map.insert(params, 1);
+        map.insert(param2, 2);
+        map.insert(param3, 2);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_split_ranges() {
+        // contains
+        let range = TimeRange::new(0, 400);
+        let other = TimeRange::new(50, 150);
+        let (left, right) = range.split_by_range(&other).unwrap();
+        assert!(left.as_ref().and(right.as_ref()).is_some());
+        assert_eq!(left.unwrap(), TimeRange::new(0, 50));
+        assert_eq!(right.unwrap(), TimeRange::new(150, 400));
+
+        // partial overlap
+        let range = TimeRange::new(0, 100);
+        let other = TimeRange::new(50, 100);
+        let (left, right) = range.split_by_range(&other).unwrap();
+        assert!(left.as_ref().is_some());
+        assert!(!right.is_some());
+        assert_eq!(left.unwrap(), TimeRange::new(0, 50));
+
+        // equals
+        let range = TimeRange::new(0, 100);
+        let other = TimeRange::new(0, 100);
+        let (left, right) = range.split_by_range(&other).unwrap();
+        assert!(left.and(right).is_none());
+
+        // does not intersect
+        let range = TimeRange::new(0, 100);
+        let other = TimeRange::new(200, 300);
+        let res = range.split_by_range(&other);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_flatten_ranges() {
+        let ranges = vec![TimeRange::new(0, 150), TimeRange::new(100, 200)];
+        let expected_res = TimeRange::new(0, 200);
+        let mut ranges = TimeRange::flatten_overlapping_ranges(ranges);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], expected_res);
+
+        ranges.clear();
+
+        ranges = vec![
+            TimeRange::new(0, 150),
+            TimeRange::new(200, 300),
+            TimeRange::new(100, 199),
+        ];
+        let expected_res = vec![TimeRange::new(0, 199), TimeRange::new(200, 300)];
+        assert_eq!(TimeRange::flatten_overlapping_ranges(ranges), expected_res);
     }
 }

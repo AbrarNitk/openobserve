@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,13 +15,11 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use config::meta::promql::NAME_LABEL;
 use datafusion::error::{DataFusionError, Result};
 use itertools::Itertools;
 
-use crate::{
-    common::meta::prom::NAME_LABEL,
-    service::promql::value::{InstantValue, Label, Value},
-};
+use crate::service::promql::value::{InstantValue, Label, Value};
 
 /// https://prometheus.io/docs/prometheus/latest/querying/functions/#label_join
 pub(crate) fn label_join(

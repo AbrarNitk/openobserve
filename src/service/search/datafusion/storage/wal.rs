@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -66,14 +66,6 @@ impl ObjectStore for FS {
         storage::LOCAL_WAL.get_range(location, range).await
     }
 
-    async fn get_ranges(&self, location: &Path, ranges: &[Range<usize>]) -> Result<Vec<Bytes>> {
-        if ranges.is_empty() {
-            return Ok(vec![]);
-        }
-        let location = &self.format_location(location);
-        storage::LOCAL_WAL.get_ranges(location, ranges).await
-    }
-
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
         let location = &self.format_location(location);
         storage::LOCAL_WAL.head(location).await
@@ -82,7 +74,13 @@ impl ObjectStore for FS {
     #[tracing::instrument(name = "datafusion::storage::local_wal::list", skip_all)]
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta>> {
         let key = prefix.unwrap().to_string();
-        let objects = super::file_list::get(&key).unwrap();
+        let objects = match super::file_list::get(&key) {
+            Ok(objects) => objects,
+            Err(e) => {
+                log::error!("Error getting file list for wal storage: {}", e);
+                vec![]
+            }
+        };
         let values = objects
             .iter()
             .map(|file| Ok(file.to_owned()))

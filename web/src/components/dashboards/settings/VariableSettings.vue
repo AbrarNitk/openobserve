@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -38,6 +38,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               color="primary"
               label="Show Dependencies"
               @click="showVariablesDependenciesGraphPopUp = true"
+              data-test="dashboard-variable-dependencies-btn"
             />
             <q-btn
               class="text-bold no-border q-ml-md"
@@ -47,6 +48,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               color="secondary"
               :label="t(`dashboard.newVariable`)"
               @click="addVariables"
+              data-test="dashboard-variable-add-btn"
             />
           </div>
         </template>
@@ -75,6 +77,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 flat
                 :title="t('dashboard.edit')"
                 @click="editVariableFn(props.row.name)"
+                data-test="dashboard-edit-variable"
               ></q-btn>
               <q-btn
                 :icon="outlinedDelete"
@@ -86,6 +89,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 round
                 flat
                 @click.stop="showDeleteDialogFn(props)"
+                data-test="dashboard-delete-variable"
               ></q-btn>
             </q-td>
           </template>
@@ -142,6 +146,7 @@ import NoData from "../../shared/grid/NoData.vue";
 import ConfirmDialog from "../../ConfirmDialog.vue";
 import { useQuasar, type QTableProps } from "quasar";
 import VariablesDependenciesGraph from "./VariablesDependenciesGraph.vue";
+import useNotifications from "@/composables/useNotifications";
 
 export default defineComponent({
   name: "VariableSettings",
@@ -155,7 +160,6 @@ export default defineComponent({
   emits: ["save"],
   setup(props, { emit }) {
     const store: any = useStore();
-    const $q = useQuasar();
     const beingUpdated: any = ref(false);
     const addDashboardForm: any = ref(null);
     const disableColor: any = ref("");
@@ -166,7 +170,12 @@ export default defineComponent({
     const dashboardVariableData = reactive({
       data: [],
     });
-
+    const $q = useQuasar();
+    const {
+      showPositiveNotification,
+      showErrorNotification,
+      showConfictErrorNotificationWithRefreshBtn,
+    } = useNotifications();
     // list of all variables, which will be same as the dashboard variables list
     const dashboardVariablesList: any = ref([]);
 
@@ -288,17 +297,22 @@ export default defineComponent({
           await getDashboardData();
           emit("save");
         }
-        $q.notify({
-          type: "positive",
-          message: "Variable deleted successfully",
+
+        showPositiveNotification("Variable deleted successfully", {
           timeout: 2000,
         });
       } catch (error: any) {
-        $q.notify({
-          type: "negative",
-          message: error?.message ?? "Variable deletion failed",
-          timeout: 2000,
-        });
+        if (error?.response?.status === 409) {
+          showConfictErrorNotificationWithRefreshBtn(
+            error?.response?.data?.message ??
+              error?.message ??
+              "Variable deletion failed"
+          );
+        } else {
+          showErrorNotification(error?.message ?? "Variable deletion failed", {
+            timeout: 2000,
+          });
+        }
       }
     };
     const handleSaveVariable = async () => {

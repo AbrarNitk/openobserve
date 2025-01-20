@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,6 +24,7 @@ import App from "./App.vue";
 import createRouter from "./router";
 import i18n from "./locales";
 import "./styles/quasar-overrides.scss";
+import "./styles/tailwind.css";
 import config from "./aws-exports";
 import SearchPlugin from "./plugins/index";
 import configService from "./services/config";

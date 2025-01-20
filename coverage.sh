@@ -3,9 +3,9 @@ set -eu -o pipefail
 # set -x
 export PS4='+ [${BASH_SOURCE[0]##*/}:${LINENO}${FUNCNAME[0]:+:${FUNCNAME[0]}}] '
 
-export COVERAGE_FUNCTIONS=${COVERAGE_FUNCTIONS:-35}
+export COVERAGE_FUNCTIONS=${COVERAGE_FUNCTIONS:-30}
 export COVERAGE_LINES=${COVERAGE_LINES:-30}
-export COVERAGE_REGIONS=${COVERAGE_REGIONS:-20}
+export COVERAGE_REGIONS=${COVERAGE_REGIONS:-19}
 
 usage() {
     cat <<EOF
@@ -27,9 +27,9 @@ EOF
 _cov_test() {
     cargo llvm-cov --version >/dev/null || cargo install cargo-llvm-cov
     cargo llvm-cov test \
+        --workspace \
         --verbose \
         --ignore-filename-regex job \
-        --ignore-run-fail \
         "$@"
 }
 

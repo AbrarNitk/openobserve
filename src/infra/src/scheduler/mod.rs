@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -81,6 +81,7 @@ pub enum TriggerModule {
     Report,
     #[default]
     Alert,
+    DerivedStream,
 }
 
 impl std::fmt::Display for TriggerModule {
@@ -88,6 +89,7 @@ impl std::fmt::Display for TriggerModule {
         match self {
             TriggerModule::Alert => write!(f, "alert"),
             TriggerModule::Report => write!(f, "report"),
+            TriggerModule::DerivedStream => write!(f, "derived_stream"),
         }
     }
 }
@@ -114,6 +116,8 @@ pub struct Trigger {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<i64>,
     pub retries: i32,
+    #[serde(default)]
+    pub data: String,
 }
 
 /// Initializes the scheduler - creates table and index
@@ -165,7 +169,7 @@ pub async fn update_trigger(trigger: Trigger) -> Result<()> {
 /// - trigger.status == "Waiting"
 ///
 /// `concurrency` - Defines the maximum number of jobs to pull at a time.
-/// `timeout` - Used to set the maximum time duration the job executation can take.
+/// `timeout` - Used to set the maximum time duration the job execution can take.
 ///     This is used to calculate the `end_time` of the trigger.
 #[inline]
 pub async fn pull(
@@ -227,4 +231,11 @@ pub async fn is_empty() -> bool {
 #[inline]
 pub async fn clear() -> Result<()> {
     CLIENT.clear().await
+}
+
+/// Returns the scheduler_max_retries set through environment config
+/// The bool element in the tuple indicates if the max retries value is included
+pub fn get_scheduler_max_retries() -> (bool, i32) {
+    let max_retries = config::get_config().limit.scheduler_max_retries;
+    (max_retries > 0, max_retries.unsigned_abs() as i32)
 }

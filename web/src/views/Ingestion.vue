@@ -1,5 +1,5 @@
 <!-- eslint-disable no-prototype-builtins -->
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -29,7 +29,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         padding="sm lg"
         color="secondary"
         no-caps
-        icon="lock_reset"
         :label="t(`ingestion.resetRUMTokenLabel`)"
         @click="showRUMUpdateDialogFn"
       />
@@ -42,7 +41,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         padding="sm lg"
         color="secondary"
         no-caps
-        icon="lock_reset"
         :label="t(`ingestion.generateRUMTokenLabel`)"
         @click="generateRUMToken"
       />
@@ -52,7 +50,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         padding="sm lg"
         color="secondary"
         no-caps
-        icon="lock_reset"
         :label="t(`ingestion.resetTokenBtnLabel`)"
         @click="showUpdateDialogFn"
       />
@@ -67,7 +64,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           store.state.organizationData.isDataIngested == false
         "
       >
-        {{ t('ingestion.redirectionIngestionMsg') }}
+        {{ t("ingestion.redirectionIngestionMsg") }}
       </span>
       <ConfirmDialog
         title="Reset Token"
@@ -84,8 +81,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         v-model="confirmRUMUpdate"
       />
     </div>
-    <q-tabs v-model="ingestTabType" horizontal
-align="left">
+    <q-tabs v-model="ingestTabType" horizontal align="left">
       <q-route-tab
         default
         name="recommended"
@@ -154,11 +150,13 @@ export default defineComponent({
           });
         })
         .catch((e) => {
-          this.q.notify({
-            type: "negative",
-            message: "Error while generating RUM Token." + e.error,
-            timeout: 5000,
-          });
+          if(e.response.status != 403){
+            this.q.notify({
+              type: "negative",
+              message: e.response?.data?.message || "Error while generating RUM Token.",
+              timeout: 5000,
+            });
+          }   
         });
 
       segment.track("Button Click", {
@@ -183,11 +181,13 @@ export default defineComponent({
           });
         })
         .catch((e) => {
-          this.q.notify({
+          if(e.response.status != 403){
+            this.q.notify({
             type: "negative",
-            message: "Error while refreshing RUM Token." + e.error,
+            message: e.response?.data?.message || "Error while refreshing RUM Token.",
             timeout: 5000,
           });
+          }  
         });
 
       segment.track("Button Click", {
@@ -212,7 +212,12 @@ export default defineComponent({
     const ingestTabType = ref("recommended");
 
     const activeTab = ref("recommended");
-    const metricRoutes = ["prometheus", "otelCollector", "telegraf", "cloudwatchMetrics"];
+    const metricRoutes = [
+      "prometheus",
+      "otelCollector",
+      "telegraf",
+      "cloudwatchMetrics",
+    ];
     const traceRoutes = ["tracesOTLP"];
     const rumRoutes = ["frontendMonitoring"];
 
@@ -311,11 +316,13 @@ export default defineComponent({
           }
         })
         .catch((e) => {
-          q.notify({
-            type: "negative",
-            message: "Error while updating Token." + e.error,
-            timeout: 5000,
-          });
+          if(e.response.status != 403){
+            q.notify({
+              type: "negative",
+              message: "Error while updating Token." + e.error,
+              timeout: 5000,
+            });
+          }
         });
 
       segment.track("Button Click", {

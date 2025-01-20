@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -31,7 +31,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       ref="qTableRef"
       :title="title"
       :rows="rows"
-      :columns="(columns as [])"
+      :columns="columns as []"
       :table-colspan="9"
       row-key="index"
       :virtual-scroll="virtualScroll"

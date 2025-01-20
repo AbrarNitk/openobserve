@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -32,6 +32,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           round
           flat
           :icon="'img:' + getImageURL('images/common/close_icon.svg')"
+          data-test="dashboard-settings-close-btn"
         />
       </div>
     </div>
@@ -54,16 +55,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               name="generalSettings"
               icon="settings"
               :label="t('dashboard.generalSettings')"
+              data-test="dashboard-settings-general-tab"
             />
             <q-tab
               name="variableSettings"
               icon="data_array"
               :label="t('dashboard.variableSettings')"
+              data-test="dashboard-settings-variable-tab"
             />
             <q-tab
               name="tabSettings"
               icon="tab"
               :label="t('dashboard.tabSettings')"
+              data-test="dashboard-settings-tab-tab"
             />
           </q-tabs>
         </div>
@@ -78,15 +82,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             transition-prev="fade"
             transition-next="fade"
           >
-            <q-tab-panel name="generalSettings">
+            <q-tab-panel name="generalSettings" data-test="general-tab-panels-default">
               <GeneralSettings @save="refreshRequired" />
             </q-tab-panel>
 
-            <q-tab-panel name="variableSettings">
+            <q-tab-panel name="variableSettings" data-test="variable-tab-panels-default">
               <VariableSettings @save="refreshRequired" />
             </q-tab-panel>
 
-            <q-tab-panel name="tabSettings">
+            <q-tab-panel name="tabSettings" data-test="tab-tab-panels-default">
               <TabsSettings @refresh="refreshRequired" />
             </q-tab-panel>
           </q-tab-panels>
@@ -111,7 +115,7 @@ export default defineComponent({
   components: {
     VariableSettings,
     GeneralSettings,
-    TabsSettings
+    TabsSettings,
   },
   emits: ["refresh"],
   setup(props, { emit }) {

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,18 +13,21 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use config::{
     get_config,
+    ider::SnowflakeIdGenerator,
     meta::stream::{PartitionTimeLevel, StreamSettings, StreamType},
     utils::{json, schema_ext::SchemaExt},
-    RwAHashMap, BLOOM_FILTER_DEFAULT_FIELDS, SQL_FULL_TEXT_SEARCH_FIELDS,
+    RwAHashMap, RwHashMap, BLOOM_FILTER_DEFAULT_FIELDS, SQL_FULL_TEXT_SEARCH_FIELDS,
+    SQL_SECONDARY_INDEX_SEARCH_FIELDS,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use futures::{StreamExt, TryStreamExt};
 use once_cell::sync::Lazy;
+use serde::Serialize;
 
 use crate::{
     db as infra_db,
@@ -39,9 +42,12 @@ pub static STREAM_SCHEMAS_COMPRESSED: Lazy<RwAHashMap<String, Vec<(i64, bytes::B
     Lazy::new(Default::default);
 pub static STREAM_SCHEMAS_LATEST: Lazy<RwAHashMap<String, SchemaCache>> =
     Lazy::new(Default::default);
-pub static STREAM_SCHEMAS_FIELDS: Lazy<RwAHashMap<String, (i64, Vec<String>)>> =
-    Lazy::new(Default::default);
 pub static STREAM_SETTINGS: Lazy<RwAHashMap<String, StreamSettings>> = Lazy::new(Default::default);
+/// Used for filtering records when a stream is configured to store original unflattened records
+/// use a RwHashMap instead of RwAHashMap because of high write ratio as
+/// SnowflakeIdGenerator::generate() requires a &mut
+pub static STREAM_RECORD_ID_GENERATOR: Lazy<RwHashMap<String, SnowflakeIdGenerator>> =
+    Lazy::new(Default::default);
 
 pub async fn init() -> Result<()> {
     history::init().await?;
@@ -58,7 +64,7 @@ pub async fn get(org_id: &str, stream_name: &str, stream_type: StreamType) -> Re
 
     let r = STREAM_SCHEMAS_LATEST.read().await;
     if let Some(schema) = r.get(cache_key) {
-        return Ok(schema.schema.clone());
+        return Ok(schema.schema().as_ref().clone());
     }
     drop(r);
     // if not found in cache, get from db
@@ -113,6 +119,7 @@ pub async fn get_from_db(
     })
 }
 
+#[tracing::instrument(name = "infra:schema:get_versions", skip_all)]
 pub async fn get_versions(
     org_id: &str,
     stream_name: &str,
@@ -244,6 +251,13 @@ pub fn unwrap_stream_settings(schema: &Schema) -> Option<StreamSettings> {
         .map(|v| StreamSettings::from(v.as_str()))
 }
 
+pub fn unwrap_stream_created_at(schema: &Schema) -> Option<i64> {
+    schema
+        .metadata()
+        .get("created_at")
+        .and_then(|v| v.parse().ok())
+}
+
 pub fn unwrap_partition_time_level(
     level: Option<PartitionTimeLevel>,
     stream_type: StreamType,
@@ -266,11 +280,11 @@ pub fn unwrap_partition_time_level(
     }
 }
 
-pub fn get_stream_setting_fts_fields(schema: &Schema) -> Vec<String> {
+pub fn get_stream_setting_fts_fields(settings: &Option<StreamSettings>) -> Vec<String> {
     let default_fields = SQL_FULL_TEXT_SEARCH_FIELDS.clone();
-    match unwrap_stream_settings(schema) {
-        Some(setting) => {
-            let mut fields = setting.full_text_search_keys;
+    match settings {
+        Some(settings) => {
+            let mut fields = settings.full_text_search_keys.clone();
             fields.extend(default_fields);
             fields.sort();
             fields.dedup();
@@ -280,17 +294,54 @@ pub fn get_stream_setting_fts_fields(schema: &Schema) -> Vec<String> {
     }
 }
 
-pub fn get_stream_setting_bloom_filter_fields(schema: &Schema) -> Vec<String> {
-    let default_fields = BLOOM_FILTER_DEFAULT_FIELDS.clone();
-    match unwrap_stream_settings(schema) {
-        Some(setting) => {
-            let mut fields = setting.bloom_filter_fields;
+pub fn get_stream_setting_index_fields(settings: &Option<StreamSettings>) -> Vec<String> {
+    let default_fields = SQL_SECONDARY_INDEX_SEARCH_FIELDS.clone();
+    match settings {
+        Some(settings) => {
+            let mut fields = settings.index_fields.clone();
             fields.extend(default_fields);
             fields.sort();
             fields.dedup();
             fields
         }
         None => default_fields,
+    }
+}
+
+pub fn get_stream_setting_bloom_filter_fields(settings: &Option<StreamSettings>) -> Vec<String> {
+    let default_fields = BLOOM_FILTER_DEFAULT_FIELDS.clone();
+    match settings {
+        Some(settings) => {
+            let mut fields = settings.bloom_filter_fields.clone();
+            fields.extend(default_fields);
+            fields.sort();
+            fields.dedup();
+            fields
+        }
+        None => default_fields,
+    }
+}
+
+pub fn get_stream_setting_index_updated_at(
+    settings: &Option<StreamSettings>,
+    created_at: Option<i64>,
+) -> i64 {
+    let created_at = match created_at {
+        Some(created_at) => created_at,
+        None => {
+            log::warn!("created_at not found in schema metadata");
+            Utc::now().timestamp_micros()
+        }
+    };
+    match settings {
+        Some(settings) => {
+            if settings.index_updated_at > 0 {
+                settings.index_updated_at
+            } else {
+                created_at
+            }
+        }
+        None => created_at,
     }
 }
 
@@ -301,10 +352,12 @@ pub async fn merge(
     schema: &Schema,
     min_ts: Option<i64>,
 ) -> Result<Option<(Schema, Vec<Field>)>> {
+    let stream_name = stream_name.trim();
+    if stream_name.is_empty() {
+        return Ok(None);
+    }
     let start_dt = min_ts;
     let key = mk_key(org_id, stream_type, stream_name);
-    #[cfg(feature = "enterprise")]
-    let key_for_update = key.clone();
     let inferred_schema = schema.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let db = infra_db::get_db().await;
@@ -416,11 +469,11 @@ pub async fn update_setting(
     stream_type: StreamType,
     metadata: std::collections::HashMap<String, String>,
 ) -> Result<()> {
+    let stream_name = stream_name.trim();
+    if stream_name.is_empty() {
+        return Ok(());
+    }
     let key = mk_key(org_id, stream_type, stream_name);
-    #[cfg(feature = "enterprise")]
-    let key_for_update = key.clone();
-    #[cfg(feature = "enterprise")]
-    let metadata_for_update = metadata.clone();
     let db = infra_db::get_db().await;
     db.get_for_update(
         &key.clone(),
@@ -472,18 +525,6 @@ pub async fn update_setting(
     )
     .await?;
 
-    // super cluster
-    #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
-        o2_enterprise::enterprise::super_cluster::queue::schema_setting(
-            &key_for_update,
-            json::to_vec(&metadata_for_update).unwrap().into(),
-            infra::db::NEED_WATCH,
-            None,
-        )
-        .await
-        .map_err(|e| Error::Message(e.to_string()))?;
-    }
     Ok(())
 }
 
@@ -494,10 +535,6 @@ pub async fn delete_fields(
     deleted_fields: Vec<String>,
 ) -> Result<()> {
     let key = mk_key(org_id, stream_type, stream_name);
-    #[cfg(feature = "enterprise")]
-    let key_for_update = key.clone();
-    #[cfg(feature = "enterprise")]
-    let deleted_fields_for_update = deleted_fields.clone();
     let db = infra_db::get_db().await;
     db.get_for_update(
         &key.clone(),
@@ -566,19 +603,6 @@ pub async fn delete_fields(
     )
     .await?;
 
-    // super cluster
-    #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
-        o2_enterprise::enterprise::super_cluster::queue::schema_delete_fields(
-            &key_for_update,
-            json::to_vec(&deleted_fields_for_update).unwrap().into(),
-            infra::db::NEED_WATCH,
-            None,
-        )
-        .await
-        .map_err(|e| Error::Message(e.to_string()))?;
-    }
-
     Ok(())
 }
 
@@ -626,9 +650,7 @@ pub fn get_merge_schema_changes(
             Some(idx) => {
                 let existing_field = &merged_fields[*idx];
                 if existing_field.data_type() != item_data_type {
-                    if !get_config().common.widening_schema_evolution {
-                        field_datatype_delta.push(existing_field.as_ref().clone());
-                    } else if is_widening_conversion(existing_field.data_type(), item_data_type) {
+                    if is_widening_conversion(existing_field.data_type(), item_data_type) {
                         is_schema_changed = true;
                         merged_fields[*idx] = item;
                         field_datatype_delta.push((**item).clone());
@@ -645,26 +667,28 @@ pub fn get_merge_schema_changes(
     if !is_schema_changed {
         (false, field_datatype_delta, vec![])
     } else {
-        (
-            true,
-            field_datatype_delta,
-            merged_fields
-                .into_iter()
-                .map(|f| f.as_ref().clone())
-                .collect::<Vec<_>>(),
-        )
+        let mut merged_fields = merged_fields
+            .into_iter()
+            .map(|f| f.as_ref().clone())
+            .collect::<Vec<_>>();
+        merged_fields.sort_by(|a, b| a.name().cmp(b.name()));
+        (true, field_datatype_delta, merged_fields)
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SchemaCache {
-    schema: Schema,
+    schema: SchemaRef,
     fields_map: HashMap<String, usize>,
     hash_key: String,
 }
 
 impl SchemaCache {
     pub fn new(schema: Schema) -> Self {
+        Self::new_from_arc(Arc::new(schema))
+    }
+
+    pub fn new_from_arc(schema: Arc<Schema>) -> Self {
         let hash_key = schema.hash_key();
         let fields_map = schema
             .fields()
@@ -683,12 +707,22 @@ impl SchemaCache {
         &self.hash_key
     }
 
-    pub fn schema(&self) -> &Schema {
+    pub fn schema(&self) -> &Arc<Schema> {
         &self.schema
     }
 
     pub fn fields_map(&self) -> &HashMap<String, usize> {
         &self.fields_map
+    }
+
+    pub fn contains_field(&self, field_name: &str) -> bool {
+        self.fields_map.contains_key(field_name)
+    }
+
+    pub fn field_with_name(&self, field_name: &str) -> Option<&FieldRef> {
+        self.fields_map
+            .get(field_name)
+            .and_then(|i| self.schema.fields().get(*i))
     }
 }
 
@@ -749,8 +783,9 @@ mod tests {
 
     #[test]
     fn test_get_stream_setting_fts_fields() {
-        let sch = Schema::new(vec![Field::new("f.c", DataType::Int32, false)]);
-        let res = get_stream_setting_fts_fields(&sch);
+        let schema = Schema::new(vec![Field::new("f.c", DataType::Int32, false)]);
+        let settings = unwrap_stream_settings(&schema);
+        let res = get_stream_setting_fts_fields(&settings);
         assert!(!res.is_empty());
     }
 }

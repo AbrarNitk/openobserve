@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -74,6 +74,7 @@ impl Metadata for TraceListIndex {
             Field::new("trace_id", DataType::Utf8, false),
         ]))
     }
+
     async fn write(&self, org_id: &str, items: Vec<MetadataItem>) -> infra::errors::Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -83,8 +84,9 @@ impl Metadata for TraceListIndex {
         let timestamp = chrono::Utc::now().timestamp_micros();
         let schema_key = self.schema.hash_key();
 
+        let mut _is_new = false;
         if !self.db_schema_init.load(Ordering::Relaxed) {
-            self.set_db_schema(org_id).await?
+            _is_new = self.set_db_schema(org_id).await?
         }
 
         let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
@@ -98,7 +100,7 @@ impl Metadata for TraceListIndex {
 
             let mut data = json::to_value(item).unwrap();
             let data = data.as_object_mut().unwrap();
-            let hour_key = ingestion::get_wal_time_key(
+            let hour_key = ingestion::get_write_partition_key(
                 timestamp,
                 PARTITION_KEYS.to_vec().as_ref(),
                 unwrap_partition_time_level(None, StreamType::Metadata),
@@ -120,10 +122,30 @@ impl Metadata for TraceListIndex {
         }
 
         let writer =
-            ingester::get_writer(org_id, &StreamType::Metadata.to_string(), STREAM_NAME).await;
-        _ = ingestion::write_file(&writer, STREAM_NAME, buf).await;
-        if let Err(e) = writer.sync().await {
-            log::error!("[TraceListIndex] error while syncing writer: {}", e);
+            ingester::get_writer(0, org_id, &StreamType::Metadata.to_string(), STREAM_NAME).await;
+        _ = ingestion::write_file(
+            &writer,
+            STREAM_NAME,
+            buf,
+            !get_config().common.wal_fsync_disabled,
+        )
+        .await;
+
+        #[cfg(feature = "enterprise")]
+        {
+            use o2_enterprise::enterprise::{
+                common::infra::config::get_config as get_o2_config,
+                openfga::authorizer::authz::set_ownership_if_not_exists,
+            };
+
+            // set ownership only in the first time
+            if _is_new && get_o2_config().openfga.enabled {
+                set_ownership_if_not_exists(
+                    org_id,
+                    &format!("{}:{}", StreamType::Metadata, STREAM_NAME),
+                )
+                .await;
+            }
         }
 
         Ok(())
@@ -159,12 +181,14 @@ impl TraceListIndex {
         res
     }
 
-    async fn set_db_schema(&self, org_id: &str) -> infra::errors::Result<()> {
+    async fn set_db_schema(&self, org_id: &str) -> infra::errors::Result<bool> {
         // check for schema
         let db_schema = infra::schema::get(org_id, STREAM_NAME, StreamType::Metadata)
             .await
             .unwrap();
+        let mut is_new = false;
         if db_schema.fields().is_empty() {
+            is_new = true;
             let timestamp = chrono::Utc::now().timestamp_micros();
             let schema = self.schema.as_ref().clone();
             if let Err(e) = db::schema::merge(
@@ -180,14 +204,20 @@ impl TraceListIndex {
             }
 
             let settings = StreamSettings {
-                partition_keys: PARTITION_KEYS.to_vec(),
                 partition_time_level: None,
+                partition_keys: PARTITION_KEYS.to_vec(),
                 full_text_search_keys: vec![],
+                index_fields: vec![],
                 bloom_filter_fields: vec!["trace_id".to_string()],
                 data_retention: 0,
                 flatten_level: None,
                 max_query_range: 0,
                 defined_schema_fields: None,
+                store_original_data: false,
+                approx_partition: false,
+                distinct_value_fields: vec![],
+                index_updated_at: 0,
+                extended_retention_days: vec![],
             };
 
             stream::save_stream_settings(org_id, STREAM_NAME, StreamType::Metadata, settings)
@@ -196,7 +226,7 @@ impl TraceListIndex {
 
         self.db_schema_init.store(true, Ordering::Release);
 
-        Ok(())
+        Ok(is_new)
     }
 }
 
@@ -245,7 +275,7 @@ mod tests {
             config::get_config().common.column_timestamp.clone(),
             json::Value::Number(timestamp.into()),
         );
-        let hour_key = ingestion::get_wal_time_key(
+        let hour_key = ingestion::get_write_partition_key(
             timestamp,
             &vec![],
             unwrap_partition_time_level(None, StreamType::Metadata),
@@ -265,6 +295,7 @@ mod tests {
         hour_buf.records_size += data_size;
 
         let writer = ingester::get_writer(
+            0,
             "openobserve",
             &StreamType::Metadata.to_string(),
             STREAM_NAME,
@@ -276,7 +307,7 @@ mod tests {
                 val.schema_key, val.schema, val.records_size, val.records
             );
         }
-        let r = ingestion::write_file(&writer, STREAM_NAME, buf).await;
+        let r = ingestion::write_file(&writer, STREAM_NAME, buf, false).await;
         println!("r: {:?}", r);
     }
 }

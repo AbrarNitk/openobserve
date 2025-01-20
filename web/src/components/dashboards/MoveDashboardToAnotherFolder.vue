@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -63,7 +63,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <span>&nbsp;</span>
 
         <!-- select folder or create new folder and select -->
-        <SelectFolderDropdown @folder-selected="selectedFolder = $event" />
+        <SelectFolderDropdown @folder-selected="selectedFolder = $event"  :activeFolderId="activeFolderId"/>
 
         <div class="flex justify-center q-mt-lg">
           <q-btn
@@ -100,7 +100,7 @@ import { getImageURL } from "../../utils/zincutils";
 import { moveDashboardToAnotherFolder } from "../../utils/commons";
 import SelectFolderDropdown from "./SelectFolderDropdown.vue";
 import { useLoading } from "@/composables/useLoading";
-import { useQuasar } from "quasar";
+import useNotifications from "@/composables/useNotifications";
 
 export default defineComponent({
   name: "MoveDashboardToAnotherFolder",
@@ -127,7 +127,8 @@ export default defineComponent({
       value: props.activeFolderId,
     });
     const { t } = useI18n();
-    const $q = useQuasar();
+    const { showPositiveNotification, showErrorNotification } =
+      useNotifications();
 
     const onSubmit = useLoading(async () => {
       await moveFolderForm.value.validate().then(async (valid: any) => {
@@ -142,18 +143,15 @@ export default defineComponent({
             props.activeFolderId,
             selectedFolder.value.value
           );
-          $q.notify({
-            type: "positive",
-            message: "Dashboard Moved successfully",
+
+          showPositiveNotification("Dashboard Moved successfully", {
             timeout: 2000,
           });
 
           emit("updated");
           moveFolderForm.value.resetValidation();
         } catch (err: any) {
-          $q.notify({
-            type: "negative",
-            message: err?.message ?? "Dashboard move failed.",
+          showErrorNotification(err?.message ?? "Dashboard move failed.", {
             timeout: 2000,
           });
         }

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,7 +21,7 @@ use arrow::array::{
 };
 use arrow_schema::{DataType, Field};
 use config::{
-    cluster::LOCAL_NODE_UUID,
+    cluster::LOCAL_NODE,
     get_config,
     meta::{
         cluster::Role,
@@ -69,12 +69,13 @@ pub async fn run_generate(worker_tx: mpsc::Sender<FileKey>) -> Result<(), anyhow
                 }
 
                 // check running node
-                let Some(node) =
-                    get_node_from_consistent_hash(&stream_name, &Role::FlattenCompactor).await
+                let Some(node_name) =
+                    get_node_from_consistent_hash(&stream_name, &Role::FlattenCompactor, None)
+                        .await
                 else {
                     continue; // no compactor node
                 };
-                if LOCAL_NODE_UUID.ne(&node) {
+                if LOCAL_NODE.name.ne(&node_name) {
                     continue; // not this node
                 }
 
@@ -146,6 +147,7 @@ pub async fn generate_by_stream(
             key: file,
             meta,
             deleted: false,
+            segment_ids: None,
         };
         // add into queue
         PROCESSING_FILES.write().insert(file.key.clone());
@@ -185,22 +187,16 @@ pub async fn generate_file(file: &FileKey) -> Result<(), anyhow::Error> {
         .await
         .unwrap_or_default();
     let bloom_filter_fields = stream_setting.bloom_filter_fields;
-    let full_text_search_fields = stream_setting.full_text_search_keys;
     let new_file = format!(
         "files{}/{}",
         get_config().common.column_all,
         file.key.strip_prefix("files/").unwrap()
     );
     let new_schema = new_batches.first().unwrap().schema();
-    let new_data = write_recordbatch_to_parquet(
-        new_schema,
-        &new_batches,
-        &bloom_filter_fields,
-        &full_text_search_fields,
-        &file.meta,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("write_recordbatch_to_parquet error: {}", e))?;
+    let new_data =
+        write_recordbatch_to_parquet(new_schema, &new_batches, &bloom_filter_fields, &file.meta)
+            .await
+            .map_err(|e| anyhow::anyhow!("write_recordbatch_to_parquet error: {}", e))?;
     // upload filee
     storage::put(&new_file, new_data.into()).await?;
     // delete from queue

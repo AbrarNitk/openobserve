@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -40,11 +40,11 @@ static FILES: Lazy<Vec<RwLock<FileData>>> = Lazy::new(|| {
 });
 static DATA: Lazy<Vec<RwHashMap<String, Bytes>>> = Lazy::new(|| {
     let cfg = get_config();
-    let mut datas = Vec::with_capacity(cfg.memory_cache.bucket_num);
+    let mut data = Vec::with_capacity(cfg.memory_cache.bucket_num);
     for _ in 0..cfg.memory_cache.bucket_num {
-        datas.push(Default::default());
+        data.push(Default::default());
     }
-    datas
+    data
 });
 
 pub struct FileData {
@@ -90,6 +90,12 @@ impl FileData {
         })
     }
 
+    async fn get_size(&self, file: &str) -> Option<usize> {
+        let idx = get_bucket_idx(file);
+        let data = DATA[idx].get(file)?;
+        Some(data.value().len())
+    }
+
     async fn set(&mut self, trace_id: &str, file: &str, data: Bytes) -> Result<(), anyhow::Error> {
         let data_size = file.len() + data.len();
         if self.cur_size + data_size >= self.max_size {
@@ -99,7 +105,7 @@ impl FileData {
             );
             // cache is full, need release some space
             let need_release_size = min(
-                self.max_size,
+                self.cur_size,
                 max(get_config().memory_cache.release_size, data_size * 100),
             );
             self.gc(trace_id, need_release_size).await?;
@@ -134,7 +140,7 @@ impl FileData {
         loop {
             let item = self.data.remove();
             if item.is_none() {
-                log::error!(
+                log::warn!(
                     "[trace_id {trace_id}] File memory cache is corrupt, it shouldn't be none"
                 );
                 break;
@@ -166,6 +172,39 @@ impl FileData {
             "[trace_id {trace_id}] File memory cache gc done, released {} bytes",
             release_size
         );
+        Ok(())
+    }
+
+    async fn remove(&mut self, trace_id: &str, file: &str) -> Result<(), anyhow::Error> {
+        log::debug!(
+            "[trace_id {trace_id}] File memory cache remove file {}",
+            file
+        );
+
+        let Some((key, data_size)) = self.data.remove_key(file) else {
+            return Ok(());
+        };
+        self.cur_size -= data_size;
+        log::debug!(
+            "[trace_id {trace_id}] File memory cache remove file done, released {} bytes",
+            data_size
+        );
+
+        // remove file from data cache
+        let idx = get_bucket_idx(&key);
+        DATA[idx].remove(&key);
+
+        // metrics
+        let columns = key.split('/').collect::<Vec<&str>>();
+        if columns[0] == "files" {
+            metrics::QUERY_MEMORY_CACHE_FILES
+                .with_label_values(&[columns[1], columns[2]])
+                .dec();
+            metrics::QUERY_MEMORY_CACHE_USED_BYTES
+                .with_label_values(&[columns[1], columns[2]])
+                .sub(data_size as i64);
+        }
+
         Ok(())
     }
 
@@ -218,6 +257,16 @@ pub async fn get(file: &str, range: Option<Range<usize>>) -> Option<Bytes> {
 }
 
 #[inline]
+pub async fn get_size(file: &str) -> Option<usize> {
+    if !get_config().memory_cache.enabled {
+        return None;
+    }
+    let idx = get_bucket_idx(file);
+    let files = FILES[idx].read().await;
+    files.get_size(file).await
+}
+
+#[inline]
 pub async fn exist(file: &str) -> bool {
     if !get_config().memory_cache.enabled {
         return false;
@@ -238,6 +287,16 @@ pub async fn set(trace_id: &str, file: &str, data: Bytes) -> Result<(), anyhow::
         return Ok(());
     }
     files.set(trace_id, file, data).await
+}
+
+#[inline]
+pub async fn remove(trace_id: &str, file: &str) -> Result<(), anyhow::Error> {
+    if !get_config().memory_cache.enabled {
+        return Ok(());
+    }
+    let idx = get_bucket_idx(file);
+    let mut files = FILES[idx].write().await;
+    files.remove(trace_id, file).await
 }
 
 async fn gc() -> Result<(), anyhow::Error> {
@@ -392,7 +451,7 @@ mod tests {
         let content = Bytes::from("Some text Need to store in cache");
         for i in 0..100 {
             let file_key = format!(
-                "files/default/logs/olympics/2022/10/03/10/6982652937134804993_1_{}.parquet",
+                "files/default/logs/olympics/2022/10/03/10/6982652937134804993_4_{}.parquet",
                 i
             );
             let resp = file_data.set(trace_id, &file_key, content.clone()).await;
@@ -405,7 +464,7 @@ mod tests {
         let trace_id = "session_123";
         let mut file_data =
             FileData::with_capacity_and_cache_strategy(get_config().memory_cache.max_size, "fifo");
-        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_2_1.parquet";
+        let file_key = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_5_1.parquet";
         let content = Bytes::from("Some text");
 
         file_data
@@ -427,8 +486,8 @@ mod tests {
     async fn test_fifo_cache_miss() {
         let trace_id = "session_456";
         let mut file_data = FileData::with_capacity_and_cache_strategy(100, "fifo");
-        let file_key1 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_3_1.parquet";
-        let file_key2 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_3_2.parquet";
+        let file_key1 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_6_1.parquet";
+        let file_key2 = "files/default/logs/olympics/2022/10/03/10/6982652937134804993_6_2.parquet";
         let content = Bytes::from("Some text");
         // set one key
         file_data

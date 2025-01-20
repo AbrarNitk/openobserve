@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -22,7 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     flat
     class="q-ml-xs q-pa-xs syntax-guide-button"
     :class="sqlmode ? 'sql-mode' : 'normal-mode'"
-    :label="t('search.syntaxGuideLabel')"
+    :title="t('search.syntaxGuideLabel')"
     icon="help"
   >
     <q-menu :class="store.state.theme == 'dark' ? 'theme-dark' : 'theme-light'">
@@ -36,14 +36,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <div class="syntax-guide-text">
               <ul class="guide-list">
                 <li>
+                  For inverted index search of value 'error' use
+                  <span class="bg-highlight">match_all('error')</span>
+                  in query editor. Search terms are case-insensitive.
+                </li>
+                <li>
                   For full text search of value 'error' use
-                  <span class="bg-highlight">match_all('error')</span> in query
-                  editor
+                  <span class="bg-highlight">match_all_raw('error')</span>
                 </li>
                 <li>
                   For case-insensitive full text search of value 'error' use
                   <span class="bg-highlight"
-                    >match_all_ignore_case('error')</span
+                    >match_all_raw_ignore_case('error')</span
                   >
                 </li>
                 <li>
@@ -51,6 +55,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <span class="bg-highlight"
                     >str_match(<b>fieldname</b>, 'error')</span
                   >
+                </li>
+                <li>
+                  For fuzzy string matching based on Levenshtein distance,
+                  search of value 'error' use
+                  <span class="bg-highlight"
+                    >fuzzy_match(<b>fieldname</b>, 'error', 1)</span
+                  >
+                  OR
+                  <span class="bg-highlight">fuzzy_match_all('error', 1)</span>
                 </li>
                 <li>
                   For case-insensitive column search of value 'error' use
@@ -67,7 +80,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <span class="bg-highlight">stream='stderr'</span>
                 </li>
                 <li>
-                  To search and use query function <i>extract_ip</i> on cloumn
+                  To search and use query function <i>extract_ip</i> on column
                   log use
                   <span class="bg-highlight">extract_ip(log) | code=200</span>
                 </li>
@@ -76,6 +89,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <a
                     href="https://openobserve.ai/docs/example-queries/"
                     target="_blank"
+                    class="hover:tw-underline text-primary"
                     >click here</a
                   >.
                 </li>
@@ -94,17 +108,24 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <div class="syntax-guide-text">
               <ul class="guide-list">
                 <li>
-                  For full text search of value 'error' use
+                  For inverted index search of value 'error' use
                   <span class="bg-highlight"
                     >SELECT * FROM <b>stream</b> WHERE match_all('error')</span
                   >
-                  in query editor
+                  in query editor. Search terms are case-insensitive.
+                </li>
+                <li>
+                  For full text search of value 'error' use
+                  <span class="bg-highlight"
+                    >SELECT * FROM <b>stream</b> WHERE
+                    match_all_raw('error')</span
+                  >
                 </li>
                 <li>
                   For case-insensitive full text search of value 'error' use
                   <span class="bg-highlight"
                     >SELECT * FROM <b>stream</b> WHERE
-                    match_all_ignore_case('error')</span
+                    match_all_raw_ignore_case('error')</span
                   >
                 </li>
                 <li>
@@ -112,6 +133,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <span class="bg-highlight"
                     >SELECT * FROM <b>stream</b> WHERE
                     str_match(<b>fieldname</b>, 'error')</span
+                  >
+                </li>
+                <li>
+                  For column search of value 'error' use
+                  <span class="bg-highlight"
+                    >SELECT * FROM <b>stream</b> WHERE
+                    fuzzy_match(<b>fieldname</b>, 'error', 1)</span
+                  >
+                </li>
+                <li>
+                  For all column search of value 'error' use
+                  <span class="bg-highlight"
+                    >SELECT * FROM <b>stream</b> WHERE fuzzy_match_all('error',
+                    1)</span
                   >
                 </li>
                 <li>
@@ -127,7 +162,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   >
                 </li>
                 <li>
-                  To search and use query function <i>extract_ip</i> on cloumn
+                  To search and use query function <i>extract_ip</i> on column
                   log use
                   <span class="bg-highlight"
                     >SELECT extract_ip(log) FROM <b>stream</b> WHERE
@@ -139,6 +174,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <a
                     href="https://openobserve.ai/docs/example-queries/"
                     target="_blank"
+                    class="hover:tw-underline text-primary"
                     >click here</a
                   >.
                 </li>
@@ -193,13 +229,10 @@ export default defineComponent({
 .syntax-guide-button {
   cursor: pointer;
   text-transform: capitalize;
-  padding: 5px 5px;
+  width: 32px;
+  height: 32px;
   font-weight: bold;
   border: 1px solid rgba(89, 96, 178, 0.3);
-}
-
-.normal-mode {
-  background-color: rgba(0, 0, 0, 0.05);
 }
 
 .sql-mode {

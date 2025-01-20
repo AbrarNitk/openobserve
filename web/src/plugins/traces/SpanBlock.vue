@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -36,7 +36,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         paddingBottom: '6px',
       }"
       ref="spanBlock"
-      @click="selectSpan"
+      @click="selectSpan(span.spanId)"
+      @mouseover="onSpanHover"
     >
       <div
         :style="{
@@ -45,33 +46,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         }"
         class="cursor-pointer flex items-center no-wrap position-relative"
         :class="defocusSpan ? 'defocus' : ''"
-        @click="selectSpan"
+        @click="selectSpan(span.spanId)"
       >
         <div
           :style="{
             height: spanDimensions.barHeight + 'px',
-            width: getWidth + '%',
-            left: getLeftPosition + '%',
+            width: spanWidth + '%',
+            left: leftPosition + '%',
             position: 'relative',
           }"
           class="flex justify-start items-center no-wrap"
           ref="spanMarkerRef"
         >
-          <q-icon
-            dense
-            round
-            flat
-            name="expand_more"
-            class="collapse-btn"
-            :style="{
-              rotate: isSpanSelected ? '0deg' : '270deg',
-            }"
-            @click.prevent.stop="toggleSpanDetails()"
-          />
-
           <div
             :style="{
-              width: 'calc(100% - 21px)',
+              width: 'calc(100% - 6px)',
               height: '100%',
               borderRadius: '2px',
               backgroundColor: span.style?.color || '#58508d',
@@ -81,13 +70,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <div
           :style="{
             position: 'absolute',
-            ...getDurationStyle,
+            ...durationStyle,
             transition: 'all 0.5s ease',
             zIndex: 1,
           }"
-          class="text-caption"
+          class="text-caption flex items-center"
         >
-          {{ formatTimeWithSuffix(span.durationUs) }}
+          <div>
+            {{ formatTimeWithSuffix(span.durationUs) }}
+          </div>
         </div>
         <q-resize-observer debounce="300" @resize="onResize" />
       </div>
@@ -100,17 +91,30 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :span="span"
         :spanData="spanData"
         :baseTracePosition="baseTracePosition"
+        @view-logs="viewSpanLogs"
+        @select-span="selectSpan"
       />
     </template>
   </div>
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref } from "vue";
+import {
+  defineComponent,
+  computed,
+  ref,
+  onMounted,
+  nextTick,
+  watch,
+  onActivated,
+} from "vue";
 import useTraces from "@/composables/useTraces";
 import { getImageURL, formatTimeWithSuffix } from "@/utils/zincutils";
 import SpanDetails from "./SpanDetails.vue";
 import { useStore } from "vuex";
+import { useI18n } from "vue-i18n";
+import { b64EncodeStandard } from "@/utils/zincutils";
+import { useRouter } from "vue-router";
 
 export default defineComponent({
   name: "SpanBlock",
@@ -148,7 +152,7 @@ export default defineComponent({
       default: () => ({}),
     },
   },
-  emits: ["toggleCollapse", "selectSpan"],
+  emits: ["toggleCollapse", "selectSpan", "hover", "view-logs"],
   components: { SpanDetails },
   setup(props, { emit }) {
     const store = useStore();
@@ -160,8 +164,16 @@ export default defineComponent({
       if (!searchObj.data.traceDetails.selectedSpanId) return false;
       return searchObj.data.traceDetails.selectedSpanId !== props.span.spanId;
     });
-    const selectSpan = () => {
-      emit("selectSpan", props.span.spanId);
+    const durationStyle = ref({});
+    const router = useRouter();
+    const { t } = useI18n();
+
+    const leftPosition = ref(0);
+
+    const spanWidth = ref(0);
+
+    const selectSpan = (spanId: string) => {
+      emit("selectSpan", spanId);
     };
     const toggleSpanCollapse = () => {
       emit("toggleCollapse", props.span.spanId);
@@ -175,59 +187,89 @@ export default defineComponent({
 
     const spanMarkerRef = ref(null);
 
-    const getLeftPosition = computed(() => {
+    const getLeftPosition = () => {
       const left =
         props.span.startTimeMs - props.baseTracePosition["startTimeMs"];
 
-      // if (props.span.startTimeMs < props.baseTracePosition["startTimeMs"]) {
-      //   const left =
-      //     props.baseTracePosition["startTimeMs"] - props.span.startTimeMs;
-      //   // props.baseTracePosition + props.baseTracePosition["durationMs"];
-      //   return -(left / props.baseTracePosition?.durationMs) * 100;
-      // }
-      // // console.log(
-      // //   props.span.startTimeMs,
-      // //   props.baseTracePosition["startTimeMs"],
-      // //   left,
-      // //   props.baseTracePosition?.durationMs
-      // // );
       return (left / props.baseTracePosition?.durationMs) * 100;
-    });
-    const getWidth = computed(() => {
+    };
+
+    const getSpanWidth = () => {
       return Number(
         (
           (props.span?.durationMs / props.baseTracePosition?.durationMs) *
           100
         ).toFixed(2)
       );
+    };
+
+    onMounted(async () => {
+      durationStyle.value = getDurationStyle();
     });
-    const getDurationStyle = computed(() => {
+
+    watch(
+      () => props.span.startTimeMs,
+      () => {
+        leftPosition.value = getLeftPosition();
+      },
+      {
+        immediate: true,
+      }
+    );
+
+    watch(
+      () => props.baseTracePosition,
+      () => {
+        leftPosition.value = getLeftPosition();
+      },
+      {
+        immediate: true,
+        deep: true,
+      }
+    );
+
+    watch(
+      () => props.span?.durationMs + props.baseTracePosition?.durationMs,
+      () => {
+        spanWidth.value = getSpanWidth();
+      }
+    );
+
+    watch(
+      () => spanBlockWidth.value + leftPosition.value + spanWidth.value,
+      (val) => {
+        durationStyle.value = getDurationStyle();
+      }
+    );
+
+    const getDurationStyle = () => {
       const style: any = {
         top: "10px",
       };
+
       const onePercent = Number((spanBlockWidth.value / 100).toFixed(2));
       const labelWidth = 60;
       if (
-        (getLeftPosition.value + getWidth.value) * onePercent + labelWidth >
+        (leftPosition.value + spanWidth.value) * onePercent + labelWidth >
         spanBlockWidth.value
       ) {
         style.right = 0;
-        style.top = "0";
-      } else if (getLeftPosition.value > 50) {
-        style.left =
-          getLeftPosition.value * onePercent - labelWidth + 10 + "px";
+        style.top = "-5px";
+      } else if (leftPosition.value > 50) {
+        style.left = leftPosition.value * onePercent - labelWidth + "px";
       } else {
         const left =
-          getLeftPosition.value +
-          (Math.floor(getWidth.value) ? getWidth.value : 1);
+          leftPosition.value +
+          (Math.floor(spanWidth.value) ? spanWidth.value : 1);
 
         style.left =
-          (left * onePercent - getLeftPosition.value * onePercent < 19
-            ? getLeftPosition.value * onePercent + 19
+          (left * onePercent - leftPosition.value * onePercent < 19
+            ? leftPosition.value * onePercent + 19
             : left * onePercent) + "px";
       }
+
       return style;
-    });
+    };
 
     const getSpanStartTime = computed(() => {
       return props.span.startTimeMs - props.baseTracePosition["startTimeMs"];
@@ -248,13 +290,22 @@ export default defineComponent({
       }
     };
 
+    const viewSpanLogs = () => {
+      emit("view-logs");
+    };
+
+    const onSpanHover = () => {
+      emit("hover");
+    };
+
     return {
+      t,
       formatTimeWithSuffix,
       selectSpan,
       toggleSpanCollapse,
       getImageURL,
-      getLeftPosition,
-      getWidth,
+      leftPosition,
+      spanWidth,
       getDurationStyle,
       spanBlock,
       onResize,
@@ -265,6 +316,9 @@ export default defineComponent({
       defocusSpan,
       isSpanSelected,
       store,
+      viewSpanLogs,
+      onSpanHover,
+      durationStyle,
     };
   },
 });
@@ -285,5 +339,17 @@ export default defineComponent({
 
 .light-grey {
   background-color: #ececec;
+}
+
+.view-span-logs {
+  visibility: hidden;
+}
+
+.span-block-overlay {
+  &:hover {
+    .view-span-logs {
+      visibility: visible;
+    }
+  }
 }
 </style>

@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,15 +16,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <!-- eslint-disable vue/x-invalid-end-tag -->
 <template>
-  <q-page class="page q-pa-md">
-    <div class="head q-table__title q-pb-md">
+  <q-page class="page">
+    <div class="head q-table__title q-mx-md q-my-sm">
       {{ t("settings.header") }}
     </div>
     <q-separator class="separator" />
     <q-splitter
       v-model="splitterModel"
       unit="px"
-      style="min-height: calc(100vh - 136px)"
+      style="min-height: calc(100vh - 104px)"
     >
       <template v-slot:before>
         <q-tabs
@@ -47,6 +47,39 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :to="'/settings/general'"
             :icon="outlinedSettings"
             :label="t('settings.generalLabel')"
+            content-class="tab_content"
+          />
+          <q-route-tab
+            name="organization"
+            :to="'/settings/organization'"
+            icon="business"
+            :label="t('settings.orgLabel')"
+            content-class="tab_content"
+          />
+          <q-route-tab
+            data-test="alert-destinations-tab"
+            name="destinations"
+            :to="{
+              name: 'alertDestinations',
+              query: {
+                org_identifier: store.state.selectedOrganization.identifier,
+              },
+            }"
+            icon="location_on"
+            :label="t('alert_destinations.header')"
+            content-class="tab_content"
+          />
+          <q-route-tab
+            data-test="alert-templates-tab"
+            name="templates"
+            :to="{
+              name: 'alertTemplates',
+              query: {
+                org_identifier: store.state.selectedOrganization.identifier,
+              },
+            }"
+            icon="description"
+            :label="t('alert_templates.header')"
             content-class="tab_content"
           />
         </q-tabs>
@@ -77,7 +110,7 @@ import { outlinedSettings } from "@quasar/extras/material-icons-outlined";
 import useIsMetaOrg from "@/composables/useIsMetaOrg";
 
 export default defineComponent({
-  name: "PageIngestion",
+  name: "AppSettings",
   setup() {
     const { t } = useI18n();
     const store = useStore();
@@ -126,7 +159,7 @@ export default defineComponent({
       router,
       config,
       settingsTab,
-      splitterModel: ref(200),
+      splitterModel: ref(250),
       outlinedSettings,
       isMetaOrg,
     };

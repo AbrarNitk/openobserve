@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,8 +15,6 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-use super::{alerts::Alert, functions::Transform};
 
 pub const DEFAULT_ORG: &str = "default";
 pub const CUSTOM: &str = "custom";
@@ -57,15 +55,31 @@ pub struct OrganizationResponse {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct OrgSummary {
     pub streams: StreamSummary,
-    pub functions: Vec<Transform>,
-    pub alerts: Vec<Alert>,
+    pub pipelines: PipelineSummary,
+    pub alerts: AlertSummary,
+    pub total_functions: i64,
+    pub total_dashboards: i64,
+}
+
+#[derive(Default, Serialize, Deserialize, ToSchema)]
+pub struct StreamSummary {
+    pub num_streams: i64,
+    pub total_records: i64,
+    pub total_storage_size: f64,
+    pub total_compressed_size: f64,
+    pub total_index_size: f64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
-pub struct StreamSummary {
-    pub num_streams: i64,
-    pub total_storage_size: f64,
-    pub total_compressed_size: f64,
+pub struct PipelineSummary {
+    pub num_realtime: i64,
+    pub num_scheduled: i64,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct AlertSummary {
+    pub num_realtime: i64,
+    pub num_scheduled: i64,
 }
 
 /// A container for passcodes and rumtokens
@@ -101,18 +115,71 @@ fn default_scrape_interval() -> u32 {
     config::get_config().common.default_scrape_interval
 }
 
+fn default_auto_refresh_interval() -> u32 {
+    config::get_config().common.min_auto_refresh_interval
+}
+
+fn default_trace_id_field_name() -> String {
+    "trace_id".to_string()
+}
+
+fn default_span_id_field_name() -> String {
+    "span_id".to_string()
+}
+
+fn default_toggle_ingestion_logs() -> bool {
+    false
+}
+
+fn default_enable_websocket_search() -> bool {
+    false
+}
+
+#[derive(Serialize, ToSchema, Deserialize, Debug, Clone)]
+pub struct OrganizationSettingPayload {
+    /// Ideally this should be the same as prometheus-scrape-interval (in
+    /// seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrape_interval: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id_field_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id_field_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toggle_ingestion_logs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_websocket_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_auto_refresh_interval: Option<u32>,
+}
+
 #[derive(Serialize, ToSchema, Deserialize, Debug, Clone)]
 pub struct OrganizationSetting {
     /// Ideally this should be the same as prometheus-scrape-interval (in
     /// seconds).
     #[serde(default = "default_scrape_interval")]
     pub scrape_interval: u32,
+    #[serde(default = "default_trace_id_field_name")]
+    pub trace_id_field_name: String,
+    #[serde(default = "default_span_id_field_name")]
+    pub span_id_field_name: String,
+    #[serde(default = "default_toggle_ingestion_logs")]
+    pub toggle_ingestion_logs: bool,
+    #[serde(default = "default_enable_websocket_search")]
+    pub enable_websocket_search: bool,
+    #[serde(default = "default_auto_refresh_interval")]
+    pub min_auto_refresh_interval: u32,
 }
 
 impl Default for OrganizationSetting {
     fn default() -> Self {
         Self {
             scrape_interval: default_scrape_interval(),
+            trace_id_field_name: default_trace_id_field_name(),
+            span_id_field_name: default_span_id_field_name(),
+            toggle_ingestion_logs: default_toggle_ingestion_logs(),
+            enable_websocket_search: default_enable_websocket_search(),
+            min_auto_refresh_interval: default_auto_refresh_interval(),
         }
     }
 }

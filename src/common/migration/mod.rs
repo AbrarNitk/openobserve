@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,11 +13,14 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::cluster::LOCAL_NODE;
+use schema::migrate_resource_names;
 use version_compare::Version;
 
 pub mod dashboards;
 pub mod file_list;
 pub mod meta;
+pub mod pipeline_func;
 pub mod schema;
 
 pub async fn check_upgrade(old_ver: &str, new_ver: &str) -> Result<(), anyhow::Error> {
@@ -33,33 +36,42 @@ pub async fn check_upgrade(old_ver: &str, new_ver: &str) -> Result<(), anyhow::E
     }
 
     log::info!("Upgrading from {} to {}", old_ver, new_ver);
-    let v053 = Version::from("v0.5.3").unwrap();
-    if old_ver < v053 && new_ver.to_string().starts_with("v0.6.") {
-        upgrade_052_053().await?;
-        return Ok(());
-    }
-
     let v093 = Version::from("v0.9.3").unwrap();
     if old_ver < v093 {
+        #[allow(deprecated)]
         upgrade_092_093().await?;
     }
 
-    Ok(())
-}
-
-async fn upgrade_052_053() -> Result<(), anyhow::Error> {
-    // migration for metadata
-    meta::run("sled", "sqlite").await?;
-
-    // migration for file_list
-    file_list::run("", "sled", "sqlite").await?;
+    let v131 = Version::from("v0.13.1").unwrap();
+    if old_ver < v131 {
+        upgrade_130_131().await?;
+    }
 
     Ok(())
 }
 
+#[deprecated(since = "0.14.0", note = "will be removed in 0.17.0")]
 async fn upgrade_092_093() -> Result<(), anyhow::Error> {
     // migration schema
+    #[allow(deprecated)]
     schema::run().await?;
 
+    Ok(())
+}
+
+async fn upgrade_130_131() -> Result<(), anyhow::Error> {
+    // migrate pipelines and function associations
+    pipeline_func::run(false).await?;
+
+    Ok(())
+}
+
+#[deprecated(since = "0.14.0", note = "will be removed in 0.17.0")]
+pub async fn upgrade_resource_names() -> Result<(), anyhow::Error> {
+    // The below migration requires ofga init ready, but on Router node,
+    // we don't initialize ofga, hence the migration should not run on router
+    if !LOCAL_NODE.is_router() {
+        migrate_resource_names().await?;
+    }
     Ok(())
 }

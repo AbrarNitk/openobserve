@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,25 +15,34 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-card class="column full-height no-wrap" v-if="indexData.schema">
+  <q-card
+    style="width: 60vw"
+    class="column full-height no-wrap"
+    v-if="indexData.schema"
+  >
     <q-card-section class="q-ma-none">
       <div class="row items-center no-wrap">
         <div class="col">
-          <div class="text-body1 text-bold" data-test="schema-title-text">
+          <div
+            class="text-body1 tw-font-semibold tw-text-xl"
+            data-test="schema-title-text"
+          >
             {{ t("logStream.schemaHeader") }}
           </div>
         </div>
         <div class="col-auto">
-          <q-btn v-close-popup="true" round flat icon="close" />
+          <q-btn v-close-popup="true" round
+flat icon="close" />
         </div>
       </div>
     </q-card-section>
     <q-separator />
+
     <q-card-section class="q-ma-none q-pa-none">
       <q-form ref="updateSettingsForm" @submit.prevent="onSubmit">
         <div
           v-if="loadingState"
-          class="q-pt-md text-center q-w-md q-mx-lg"
+          class="q-pt-md text-center q-w-md q-mx-lg tw-flex tw-justify-center"
           style="max-width: 450px"
         >
           <q-spinner-hourglass color="primary" size="lg" />
@@ -45,320 +54,588 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         >
           No data available.
         </div>
-        <div v-else class="indexDetailsContainer" style="height: 100vh">
-          <div class="title" data-test="schema-stream-title-text">
-            {{ indexData.name }}
-          </div>
-          <div class="q-table__container q-table--cell-separator">
-            <table class="q-table" data-test="schema-stream-meta-data-table">
-              <thead>
-                <tr>
-                  <th v-if="store.state.zoConfig.show_stream_stats_doc_num">
-                    {{ t("logStream.docsCount") }}
-                  </th>
-                  <th>{{ t("logStream.storageSize") }}</th>
-                  <th v-if="isCloud !== 'true'">
-                    {{ t("logStream.compressedSize") }}
-                  </th>
-                  <th v-if="store.state.zoConfig.show_stream_stats_doc_num">
-                    {{ t("logStream.time") }}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td v-if="store.state.zoConfig.show_stream_stats_doc_num">
-                    {{
-                      parseInt(indexData.stats.doc_num).toLocaleString("en-US")
-                    }}
-                  </td>
-                  <td>
-                    {{ formatSizeFromMB(indexData.stats.storage_size) }}
-                  </td>
-                  <td v-if="isCloud !== 'true'">
-                    {{ formatSizeFromMB(indexData.stats.compressed_size) }}
-                  </td>
-                  <td
-                    v-if="store.state.zoConfig.show_stream_stats_doc_num"
-                    class="text-center"
-                  >
-                    {{ indexData.stats.doc_time_min }}
-                    <br />
-                    to
-                    <br />
-                    {{ indexData.stats.doc_time_max }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <q-separator v-if="showDataRetention" class="q-mt-lg q-mb-lg" />
-
-          <template v-if="showDataRetention">
-            <div class="row flex items-center q-pb-xs q-mt-lg">
-              <label class="q-pr-sm text-bold">Data Retention (in days)</label>
-              <q-input
-                data-test="stream-details-data-retention-input"
-                v-model="dataRetentionDays"
-                type="number"
-                dense
-                filled
-                min="0"
-                round
-                class="q-mr-sm data-retention-input"
-                :rules="[(val: any) => (!!val && val > 0) || 'Retention period must be at least 1 day']"
-                @change="formDirtyFlag = true"
-              ></q-input>
-              <div>
-                <span class="text-bold">Note:</span> Global data retention
-                period is {{ store.state.zoConfig.data_retention_days }} days
+        <div v-else
+class="indexDetailsContainer" style="height: 100vh">
+          <div
+            class="titleContainer tw-flex tw-flex-col tw-items-flex-start tw-gap-5"
+          >
+            <div
+              data-test="stream-details-container"
+              class="stream_details_container tw-flex tw-justify-between tw-gap-5 tw-flex-wrap"
+            >
+              <div data-test="schema-stream-title-text">
+                {{ t("alerts.stream_name") }}
+                <span class="title q-pl-xs" > {{ indexData.name }}</span>
+              </div>
+              <div
+                v-if="store.state.zoConfig.show_stream_stats_doc_num"
+                data-test="schema-stream-title-text"
+              >
+                {{ t("logStream.docsCount") }}
+                <span class="title q-pl-xs">
+                  {{
+                    parseInt(indexData.stats.doc_num).toLocaleString("en-US")
+                  }}
+                </span>
+              </div>
+              <div data-test="schema-stream-title-text">
+                {{ t("logStream.storageSize") }}
+                <span class="title q-pl-xs">
+                  {{ formatSizeFromMB(indexData.stats.storage_size) }}</span
+                >
+              </div>
+              <div
+                v-if="isCloud !== 'true'"
+                data-test="schema-stream-title-text"
+              >
+                {{ t("logStream.compressedSize") }}
+                <span class="title q-pl-xs">
+                  {{ formatSizeFromMB(indexData.stats.compressed_size) }}</span
+                >
               </div>
             </div>
+            <div class="tw-flex tw-justify-between">
+              <div
+                v-if="isCloud !== 'true'"
+                data-test="schema-stream-title-text"
+              >
+                {{ t("logStream.indexSize") }}
+                <span class="title q-pl-xs">
+                  {{ formatSizeFromMB(indexData.stats.index_size) }}</span
+                >
+              </div>
+              <div
+                class="stream-time-container flex justify-between tw-gap-5"
+                v-if="store.state.zoConfig.show_stream_stats_doc_num"
+                data-test="schema-stream-title-text"
+              >
+              
 
-            <div class="row flex items-center q-pb-xs q-mt-lg">
-              <label class="q-pr-sm text-bold">Max Query Range (in hours)</label>
-              <q-input
-                data-test="stream-details-max-query-range-input"
-                v-model="maxQueryRange"
-                type="number"
-                dense
-                filled
-                min="0"
-                round
-                class="q-mr-sm data-retention-input"
-                @change="formDirtyFlag = true"
-              ></q-input>
+                <span class="q-px-xs">
+                      Start Time:
+                 <span class="title">{{ indexData.stats.doc_time_min }}</span>
+                </span>
+                
+                <span class=" q-px-xs">
+                  End Time:
+                  <span class="title">{{ indexData.stats.doc_time_max }}</span>
+                </span>
+
+              </div>
             </div>
-          </template>
-
-
-          <template>
-           
-          </template>
-
-          <template
-            v-if="
-              indexData.defined_schema_fields.length && isSchemaEvolutionEnabled
-            "
-          >
-            <q-separator
-              id="schema-add-fields-section"
-              class="q-mt-lg q-mb-lg"
-            />
-            <div
-              data-test="schema-add-fields-title"
-              class="q-pr-sm text-bold q-mb-sm"
-            >
-              Add Fields
-            </div>
-            <StreamFieldsInputs
-              :fields="newSchemaFields"
-              :showHeader="false"
-              :visibleInputs="{
-                name: true,
-                type: false,
-                index_type: false,
-              }"
-              @add="addSchemaField"
-              @remove="removeSchemaField"
-            />
-          </template>
-          <q-separator class="q-mt-lg q-mb-lg" />
-
-          <div class="title" data-test="schema-log-stream-mapping-title-text">
-            {{ t("logStream.mapping") }}
-            <label
-              v-show="indexData.defaultFts"
-              class="warning-msg"
-              style="font-weight: normal"
-              >- Using default fts keys, as no fts keys are set for
-              stream.</label
-            >
           </div>
 
-          <!-- Note: Drawer max-height to be dynamically calculated with JS -->
-          <div
-            class="q-table__container q-table--cell-separator"
-            style="margin-bottom: 30px"
-          >
-            <q-table
-              data-test="schema-log-stream-field-mapping-table"
-              :rows="indexData.schema"
-              :columns="columns"
-              :row-key="(row) => 'tr_' + row.name"
-              :filter="`${filterField}@${activeTab}`"
-              :filter-method="filterFieldFn"
-              :pagination="{ rowsPerPage }"
-              selection="multiple"
-              v-model:selected="selectedFields"
-              class="q-table"
-              id="schemaFieldList"
-              :rows-per-page-options="[]"
-              :hidePagination="indexData.schema.length <= rowsPerPage"
-              dense
-            >
-              <template #top-right>
-                <div class="flex justify-between items-center full-width">
-                  <div>
-                    <app-tabs
-                      v-if="isSchemaEvolutionEnabled"
-                      class="schema-fields-tabs"
-                      style="
-                        border: 1px solid #8a8a8a;
-                        border-radius: 4px;
-                        overflow: hidden;
-                      "
-                      data-test="schema-fields-tabs"
-                      :tabs="tabs"
-                      :active-tab="activeTab"
-                      @update:active-tab="updateActiveTab"
-                    />
-                  </div>
-
-                  <q-input
-                    data-test="schema-field-search-input"
-                    v-model="filterField"
-                    data-cy="schema-index-field-search-input"
-                    filled
-                    borderless
-                    dense
-                    debounce="1"
-                    :placeholder="t('search.searchField')"
+          <template v-if="showDataRetention">
+            <div class="tw-flex tw-justify-between">
+              <div class="row flex items-center q-pb-xs q-mt-lg">
+                <div class="flex tw-flex-col">
+                  <label class="q-pr-sm tw-font-medium"
+                    >Data Retention in days</label
                   >
-                    <template #prepend>
-                      <q-icon name="search" />
-                    </template>
-                  </q-input>
+                  <span class="tw-text-xs tw-font-normal">
+                    (Global retention is
+                    {{ store.state.zoConfig.data_retention_days }} days)
+                  </span>
                 </div>
-              </template>
-              <template v-slot:header-selection="scope">
-                <q-td class="text-center">
-                  <q-checkbox
-                    v-if="
-                      !(
-                        scope.name == store.state.zoConfig.timestamp_column ||
-                        scope.name == allFieldsName
-                      )
-                    "
-                    :data-test="`schema-stream-delete-${scope.name}-field-fts-key-checkbox`"
-                    v-model="scope.selected"
-                    size="sm"
-                  />
-                </q-td>
-              </template>
+                <q-input
+                  data-test="stream-details-data-retention-input"
+                  v-model="dataRetentionDays"
+                  type="number"
+                  dense
+                  filled
+                  min="1"
+                  round
+                  class="q-mr-sm q-ml-sm data-retention-input"
+                  hide-bottom-space
+                  @change="formDirtyFlag = true"
+                  @update:model-value="markFormDirty"
+                />
+                <div></div>
+              </div>
 
-              <template v-slot:body-selection="scope">
-                <q-td class="text-center">
-                  <q-checkbox
-                    v-if="
-                      !(
-                        scope.row.name ==
-                          store.state.zoConfig.timestamp_column ||
-                        scope.row.name == allFieldsName
-                      )
-                    "
-                    :data-test="`schema-stream-delete-${scope.row.name}-field-fts-key-checkbox`"
-                    v-model="scope.selected"
-                    size="sm"
-                  />
-                </q-td>
-              </template>
+              <div class="row flex items-center q-pb-xs q-mt-lg">
+                <label class="q-pr-sm tw-font-medium"
+                  >Max Query Range (in hours)</label
+                >
+                <q-input
+                  data-test="stream-details-max-query-range-input"
+                  v-model="maxQueryRange"
+                  type="number"
+                  dense
+                  filled
+                  min="0"
+                  round
+                  class="q-mr-sm data-retention-input"
+                  @wheel.prevent
+                  @change="formDirtyFlag = true"
+                  @update:model-value="markFormDirty"
+                />
+              </div>
 
-              <template v-slot:body-cell-name="props">
-                <q-td>{{ props.row.name }}</q-td>
-              </template>
-              <template v-slot:body-cell-type="props">
-                <q-td>{{ props.row.type }}</q-td>
-              </template>
-              <template v-slot:body-cell-index_type="props">
-                <q-td data-test="schema-stream-index-select"
-                  ><q-select
-                    v-if="
-                      !(
-                        props.row.name ==
-                          store.state.zoConfig.timestamp_column ||
-                        props.row.name == allFieldsName
-                      )
-                    "
-                    v-model="props.row.index_type"
-                    :options="streamIndexType"
-                    :popup-content-style="{ textTransform: 'capitalize' }"
-                    color="input-border"
-                    bg-color="input-bg"
-                    class="stream-schema-index-select q-py-xs fit q-pa-xs"
-                    size="xs"
-                    :option-disable="
-                      (_option) => disableOptions(props.row, _option)
-                    "
-                    multiple
-                    :max-values="2"
-                    map-options
-                    emit-value
-                    autoclose
-                    clearable
-                    stack-label
-                    outlined
-                    filled
-                    dense
-                    style="width: 300px"
-                    @update:model-value="markFormDirty(props.row.name, 'fts')"
-                  />
-                </q-td>
-              </template>
-              <template v-slot:bottom-row>
-                <q-tr
-                  ><q-td colspan="100%">
-                    <div v-if="indexData.schema.length > 0" class="q-mt-sm">
+              <div class="row flex items-center q-pb-xs q-mt-lg">
+                <q-toggle
+                  data-test="log-stream-use_approx-toggle-btn"
+                  v-model="approxPartition"
+                  :label="t('logStream.approxPartition')"
+                  @click="formDirtyFlag = true"
+                  left-label
+                  dense
+                />
+              </div>
+            </div>
+            <div
+              class="q-ma-none q-pa-none text-negative"
+              style="min-height: 20px"
+            >
+              <span v-if="dataRetentionDays <= 0 || dataRetentionDays == ''">
+                Retention period must be at least 1 day
+              </span>
+            </div>
+          </template>
+          <div>
+            <div class="flex justify-start">
+              <q-tabs v-model="activeMainTab" inline-label dense>
+                <!-- Schema Settings Tab with conditional class -->
+                <q-tab
+                  :class="{ 'text-primary': activeMainTab === 'schemaSettings' }"
+                  name="schemaSettings"
+                  icon="settings"
+                  label="Schema Settings"
+                />
+
+                <!-- Red Button Tab -->
+                <q-tab
+                :class="{ 'text-primary': activeMainTab === 'redButton' }"
+                  name="redButton"
+                  icon="backup"
+                  label="Extended Retention"
+                />
+              </q-tabs>
+
+            </div>
+          </div>
+          <!-- schema settings tab -->
+          <div v-if="activeMainTab == 'schemaSettings'">
+            <div
+              class="title flex tw-justify-between tw-items-center"
+              data-test="schema-log-stream-mapping-title-text"
+            >
+              <div style="font-weight: 400" class="q-mt-md">
+                <label
+                  v-show="indexData.defaultFts"
+                  style="font-weight: 600"
+                  class="mapping-warning-msg"
+                >
+                  {{ t("logStream.mapping") }} Default FTS keys used (no custom
+                  keys set).</label
+                >
+              </div>
+              <q-toggle
+                data-test="log-stream-store-original-data-toggle-btn"
+                v-model="storeOriginalData"
+                :label="t('logStream.storeOriginalData')"
+                @click="formDirtyFlag = true"
+                left-label
+                dense
+              />
+            </div>
+            <div class="flex justify-between items-center full-width q-mb-md">
+              <div>
+                <app-tabs
+                  v-if="isSchemaEvolutionEnabled"
+                  class="schema-fields-tabs"
+                  style="
+                    border: 1px solid #8a8a8a;
+                    border-radius: 4px;
+                    overflow: hidden;
+                  "
+                  data-test="schema-fields-tabs"
+                  :tabs="tabs"
+                  :active-tab="activeTab"
+                  @update:active-tab="updateActiveTab"
+                />
+              </div>
+
+              <div class="flex items-center tw-gap-4">
+                <q-input
+                  data-test="schema-field-search-input"
+                  v-model="filterField"
+                  data-cy="schema-index-field-search-input"
+                  filled
+                  borderless
+                  dense
+                  debounce="1"
+                  :placeholder="t('search.searchField')"
+                >
+                  <template #prepend>
+                    <q-icon name="search" />
+                  </template>
+                </q-input>
+                <q-btn
+                  color="primary"
+                  data-test="schema-add-fields-title"
+                  @click="openDialog"
+                  class="q-my-sm text-bold no-border"
+                  padding="sm md"
+                  no-caps
+                  dense
+                  :disable="isDialogOpen"
+                >
+                  Add Field(s)
+                </q-btn>
+              </div>
+            </div>
+            <div class="q-mb-md" v-if="isDialogOpen">
+              <q-card class="add-fields-card">
+                <!-- Header Section -->
+                <q-card-section class="q-pa-none" style="padding: 8px 16px 6px 16px">
+                  <div class="tw-flex tw-justify-between tw-items-center">
+                    <div class="text-h6">Add Field(s)</div>
+                    <div>
                       <q-btn
-                        v-bind:disable="!selectedFields.length"
-                        data-test="schema-delete-button"
-                        class="q-my-sm text-bold btn-delete"
-                        color="warning"
-                        :label="t('logStream.delete')"
+                        data-test="add-stream-cancel-btn"
+                        icon="close"
+                        class=" text-bold q-mr-md"
                         text-color="light-text"
-                        padding="sm md"
                         no-caps
-                        @click="confirmQueryModeChangeDialog = true"
+                        dense
+                        flat
+                        @click="closeDialog"
                       />
+                    </div>
+                  </div>
+                </q-card-section>
+                <!-- Main Content (Scrollable if necessary) -->
+                <q-card-section
+                  class="q-pa-none"
+                  style="flex: 1; overflow-y: auto; padding: 4px 16px 6px 16px"
+                >
+                  <StreamFieldsInputs
+                    :fields="newSchemaFields"
+                    :showHeader="false"
+                    :isInSchema="true"
+                    :visibleInputs="{
+                      name: true,
+                      type: false,
+                      index_type: false,
+                    }"
+                    @add="addSchemaField"
+                    @remove="removeSchemaField"
+                  />
+                </q-card-section>
+              </q-card>
+            </div>
 
-                      <q-btn
-                        v-if="isSchemaEvolutionEnabled"
-                        data-test="schema-add-field-button"
-                        class="q-my-sm no-border text-bold q-ml-md"
-                        :label="
-                          activeTab === 'schemaFields'
-                            ? t('logStream.removeSchemaField')
-                            : t('logStream.addSchemaField')
-                        "
-                        padding="sm md"
-                        color="secondary"
-                        no-caps
-                        v-bind:disable="!selectedFields.length"
-                        @click="updateDefinedSchemaFields"
-                      />
+            <!-- Note: Drawer max-height to be dynamically calculated with JS -->
+            <div
+              :class="
+                store.state.theme === 'dark'
+                  ? 'dark-theme-table'
+                  : 'light-theme-table'
+              "
+              style="margin-bottom: 30px"
+            >
+              <q-table
+                ref="qTable"
+                data-test="schema-log-stream-field-mapping-table"
+                :rows="indexData.schema"
+                :columns="columns"
+                :row-key="(row) => 'tr_' + row.name"
+                :filter="`${filterField}@${activeTab}`"
+                :filter-method="filterFieldFn"
+                :pagination="pagination"
+                selection="multiple"
+                v-model:selected="selectedFields"
+                class="q-table"
+                id="schemaFieldList"
+                :rows-per-page-options="[]"
+                dense
+              >
+                <template v-slot:header="props">
+                  <q-tr :props="props">
+                    <q-th>
+                      <q-checkbox v-model="props.selected" color="primary" />
+                    </q-th>
+                    <q-th
+                      v-for="col in props.cols"
+                      :key="col.name"
+                      :props="props"
+                    >
+                      <span v-if="col.icon">
+                        <q-icon color="primary" :name="outlinedPerson"></q-icon>
+                        <q-icon color="primary" :name="outlinedSchema"></q-icon>
+                      </span>
+                      <span v-else>
+                        {{ col.label }}
+                      </span>
+                    </q-th>
+                  </q-tr>
+                </template>
+                <template v-slot:header-selection="scope">
+                  <q-td class="text-center">
+                    <q-checkbox
+                      v-if="
+                        !(
+                          scope.name == store.state.zoConfig.timestamp_column ||
+                          scope.name == allFieldsName
+                        )
+                      "
+                      :data-test="`schema-stream-delete-${scope.name}-field-fts-key-checkbox`"
+                      v-model="scope.selected"
+                      size="sm"
+                    />
+                  </q-td>
+                </template>
 
-                      <q-btn
-                        v-bind:disable="!formDirtyFlag"
-                        data-test="schema-update-settings-button"
-                        :label="t('logStream.updateSettings')"
-                        class="q-my-sm text-bold no-border q-ml-md float-right"
-                        color="secondary"
-                        padding="sm xl"
-                        type="submit"
-                        no-caps
+                <template v-slot:body-selection="scope">
+                  <q-td class="text-center q-td--no-hover">
+                    <q-checkbox
+                      v-if="
+                        !(
+                          scope.row.name ==
+                            store.state.zoConfig.timestamp_column ||
+                          scope.row.name == allFieldsName
+                        )
+                      "
+                      :data-test="`schema-stream-delete-${scope.row.name}-field-fts-key-checkbox`"
+                      v-model="scope.selected"
+                      size="sm"
+                    />
+                  </q-td>
+                </template>
+
+                <template v-slot:body-cell-name="props">
+                  <q-td class="q-td--no-hover field-name">{{
+                    props.row.name
+                  }}</q-td>
+                </template>
+                <template v-slot:body-cell-type="props">
+                  <q-td>{{ props.row.type }}</q-td>
+                </template>
+                <template v-slot:body-cell-settings="props">
+                  <q-td class="text-left" v-if="props.row.isUserDefined">
+                    <q-icon color="primary" :name="outlinedPerson"></q-icon>
+                    <q-icon color="primary" :name="outlinedSchema"></q-icon>
+                  </q-td>
+                  <q-td v-else> </q-td>
+                </template>
+                <template v-slot:body-cell-index_type="props">
+                  <q-td data-test="schema-stream-index-select">
+                    <q-select
+                      v-if="
+                        !(
+                          props.row.name ==
+                            store.state.zoConfig.timestamp_column ||
+                          props.row.name == allFieldsName
+                        )
+                      "
+                      v-model="props.row.index_type"
+                      :options="streamIndexType"
+                      :popup-content-style="{ textTransform: 'capitalize' }"
+                      color="input-border"
+                      bg-color="input-bg"
+                      class="stream-schema-index-select q-py-xs fit q-pa-xs"
+                      size="xs"
+                      :option-disable="
+                        (_option) => disableOptions(props.row, _option)
+                      "
+                      multiple
+                      :max-values="2"
+                      map-options
+                      emit-value
+                      autoclose
+                      clearable
+                      stack-label
+                      outlined
+                      filled
+                      dense
+                      style="min-width: 300px; max-width: 300px"
+                      @update:model-value="markFormDirty(props.row.name, 'fts')"
+                    />
+                  </q-td>
+                </template>
+
+                <template #bottom="scope">
+                  <QTablePagination
+                    :scope="scope"
+                    :position="'bottom'"
+                    :resultTotal="resultTotal"
+                    :perPageOptions="perPageOptions"
+                    @update:changeRecordPerPage="changePagination"
+                  />
+                </template>
+              </q-table>
+            </div>
+          </div>
+          <!-- red button tab -->
+          <div v-else>
+            <div
+              class="mapping-warning-msg q-mb-sm q-mt-sm"
+              style="width: fit-content"
+            >
+              <span style="font-weight: 600">
+                <q-icon name="info" class="q-mr-xs" size="16px" />
+
+                Additional
+                {{ store.state.zoConfig.extended_data_retention_days }} days of extension
+                will be applied to the selected date ranges</span
+              >
+            </div>
+            <div class="q-mt-sm">
+              <div class="text-center q-mt-sm tw-flex items-center ">
+                <div class="flex items-center">
+                  <span class="text-bold"> Select Date</span>
+                <date-time
+                  class="q-mx-sm"
+                  @on:date-change="dateChangeValue"
+                  disable-relative
+                  hide-relative-time
+                  hide-relative-timezone
+                  :minDate="minDate"
+                />
+                </div>
+                <span class="text-bold">
+                  (UTC Timezone)
+                </span>
+
+              </div>
+
+              <div class="q-mt-sm" style="margin-bottom: 30px">
+                <q-table
+                  ref="qTable"
+                  :row-key="(row, index) => 'tr_' + row.index"
+                  data-test="schema-log-stream-field-mapping-table"
+                  :rows="redBtnRows"
+                  :columns="redBtnColumns"
+                  :pagination="pagination"
+                  selection="multiple"
+                  v-model:selected="selectedDateFields"
+                  class="q-table"
+                  id="schemaFieldList"
+                  :rows-per-page-options="[]"
+                  dense
+                >
+                  <template v-slot:header-selection="scope">
+                    <q-td class="text-center">
+                      <q-checkbox
+                        :data-test="`schema-stream-delete-${scope.name}-field-fts-key-checkbox`"
+                        v-model="scope.selected"
+                        size="sm"
                       />
-                      <q-btn
-                        v-close-popup="true"
-                        data-test="schema-cancel-button"
-                        class="q-my-sm text-bold float-right q-ml-md"
-                        :label="t('logStream.cancel')"
-                        text-color="light-text"
-                        padding="sm md"
-                        no-caps
-                      /></div></q-td
-                ></q-tr>
-              </template>
-            </q-table>
+                    </q-td>
+                  </template>
+
+                  <!-- Body Slot for Selection -->
+                  <template v-slot:body-selection="scope">
+                    <q-td class="text-center q-td--no-hover">
+                      <q-checkbox
+                        :data-test="`schema-stream-delete-${scope.row.name}-field-fts-key-checkbox`"
+                        v-model="scope.selected"
+                        size="sm"
+                      />
+                    </q-td>
+                  </template>
+
+
+                  <template #bottom="scope">
+                    <QTablePagination
+                      :scope="scope"
+                      :position="'bottom'"
+                      :resultTotal="redBtnRows.length"
+                      :perPageOptions="perPageOptions"
+                      @update:changeRecordPerPage="changePagination"
+                    />
+                  </template>
+                </q-table>
+              </div>
+            </div>
+          </div>
+          <!-- floating footer for the table -->
+
+          <div
+            :class="store.state.theme === 'dark' ? 'dark-theme' : 'light-theme'"
+            class="floating-buttons q-px-md q-py-xs"
+          >
+            <div
+              v-if="indexData.schema.length > 0"
+              class="q-mt-sm flex items-center justify-between"
+            >
+              <div class="flex items-center">
+                <span
+                  v-if="activeMainTab == 'schemaSettings'"
+                  class="q-px-sm q-py-md"
+                  ><strong> {{ selectedFields.length }}</strong> fields
+                  selected</span
+                >
+                <q-btn
+                  v-if="
+                    isSchemaEvolutionEnabled &&
+                    activeMainTab == 'schemaSettings'
+                  "
+                  data-test="schema-add-field-button"
+                  class="q-my-sm no-border text-bold q-mr-md"
+                  padding="sm md"
+                  color="primary"
+                  no-caps
+                  v-bind:disable="!selectedFields.length"
+                  @click="updateDefinedSchemaFields"
+                >
+                  <span class="flex items-center justify-start q-mr-sm">
+                    <q-icon size="14px" :name="outlinedPerson" />
+                    <q-icon size="14px" :name="outlinedSchema" />
+                  </span>
+                  {{
+                    activeTab === "schemaFields"
+                      ? t("logStream.removeSchemaField")
+                      : t("logStream.addSchemaField")
+                  }}
+                </q-btn>
+                {{   }}
+                <q-btn
+                  v-bind:disable="
+                  !selectedFields.length &&  (!selectedDateFields.length) 
+                  "
+                  data-test="schema-delete-button"
+                  class="q-my-sm text-bold btn-delete"
+                  text-color="red"
+                  padding="sm md"
+                  no-caps
+                  dense
+                  flat
+                  style="border: 1px red solid"
+                  @click="activeMainTab == 'schemaSettings' ? confirmQueryModeChangeDialog = true : confirmDeleteDatesDialog = true"
+                >
+                  <span class="flex items-center tw-gap-1">
+                    <q-icon size="14px" :name="outlinedDelete" />
+                    {{ t("logStream.delete") }}
+                  </span>
+                </q-btn>
+              </div>
+              <div class="flex justify-end">
+                <q-btn
+                  v-close-popup="true"
+                  data-test="schema-cancel-button"
+                  class="q-my-sm text-bold q-ml-md btn-delete"
+                  :label="t('logStream.cancel')"
+                  text-color="red"
+                  padding="sm md"
+                  no-caps
+                  dense
+                  flat
+                  style="border: 1px red solid"
+                />
+                <q-btn
+                  v-bind:disable="!formDirtyFlag"
+                  data-test="schema-update-settings-button"
+                  :label="t('logStream.updateSettings')"
+                  class="q-my-sm text-bold no-border q-ml-md"
+                  color="secondary"
+                  padding="sm xl"
+                  type="submit"
+                  no-caps
+                />
+              </div>
+            </div>
           </div>
         </div>
       </q-form>
@@ -368,6 +645,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   <q-card v-else class="column q-pa-md full-height no-wrap">
     <h5>Wait while loading...</h5>
   </q-card>
+
   <ConfirmDialog
     title="Delete Action"
     :message="t('logStream.deleteActionMessage')"
@@ -375,23 +653,52 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     @update:cancel="confirmQueryModeChangeDialog = false"
     v-model="confirmQueryModeChangeDialog"
   />
+  <ConfirmDialog
+    title="Delete Dates"
+    :message="t('logStream.deleteDatesMessage')"
+    @update:ok="deleteDates()"
+    @update:cancel="confirmDeleteDatesDialog = false"
+    v-model="confirmDeleteDatesDialog"
+  />
 </template>
 
 <script lang="ts">
 // @ts-nocheck
-import { computed, defineComponent, onBeforeMount, reactive, ref } from "vue";
+import {
+  computed,
+  defineComponent,
+  onBeforeMount,
+  reactive,
+  ref,
+  onMounted,
+  watch,
+} from "vue";
 import { useI18n } from "vue-i18n";
 import { useStore } from "vuex";
 import { useQuasar, date, format } from "quasar";
 import streamService from "../../services/stream";
 import segment from "../../services/segment_analytics";
-import { formatSizeFromMB, getImageURL } from "@/utils/zincutils";
+import {
+  formatSizeFromMB,
+  getImageURL,
+  timestampToTimezoneDate,
+  convertDateToTimestamp,
+} from "@/utils/zincutils";
 import config from "@/aws-exports";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import useStreams from "@/composables/useStreams";
 import { useRouter } from "vue-router";
 import StreamFieldsInputs from "@/components/logstream/StreamFieldInputs.vue";
 import AppTabs from "@/components/common/AppTabs.vue";
+
+import QTablePagination from "@/components/shared/grid/Pagination.vue";
+import {
+  outlinedSchema,
+  outlinedPerson,
+  outlinedDelete,
+} from "@quasar/extras/material-icons-outlined";
+
+import DateTime from "@/components/DateTime.vue";
 
 const defaultValue: any = () => {
   return {
@@ -416,6 +723,8 @@ export default defineComponent({
     ConfirmDialog,
     StreamFieldsInputs,
     AppTabs,
+    QTablePagination,
+    DateTime,
   },
   setup({ modelValue }) {
     const { t } = useI18n();
@@ -425,15 +734,48 @@ export default defineComponent({
     const updateSettingsForm: any = ref(null);
     const isCloud = config.isCloud;
     const dataRetentionDays = ref(0);
+    const storeOriginalData = ref(false);
     const maxQueryRange = ref(0);
     const confirmQueryModeChangeDialog = ref(false);
+    const confirmDeleteDatesDialog = ref(false);
     const formDirtyFlag = ref(false);
     const loadingState = ref(true);
-    const rowsPerPage = ref(250);
+    const rowsPerPage = ref(20);
     const filterField = ref("");
     const router = useRouter();
+    const qTable = ref(null);
+    const minDate = ref(null);
+    const selectedDateFields = ref([]);
+    const IsdeleteBtnVisible = ref(false);
+    const redBtnRows = ref([]);
+
     const newSchemaFields = ref([]);
     const activeTab = ref("allFields");
+    const activeMainTab = ref("schemaSettings");
+    let previousSchemaVersion: any = null;
+    const approxPartition = ref(false);
+    const isDialogOpen = ref(false);
+    const redDaysList = ref([]);
+    const resultTotal = ref<number>(0);
+    const perPageOptions : any = [
+      { label: "5", value: 5 },
+      { label: "10", value: 10 },
+      { label: "20", value: 20 },
+      { label: "50", value: 50 },
+      { label: "100", value: 100 },
+      { label: "All", value: 0 },
+    ];
+
+    const changePagination = (val: { label: string; value: any }) => {
+      selectedPerPage.value = val.value;
+      pagination.value.rowsPerPage = val.value;
+      qTable.value?.setPagination(pagination.value);
+    };
+
+    const selectedPerPage = ref<number>(20);
+    const pagination: any = ref({
+      rowsPerPage: 20,
+    });
 
     const selectedFields = ref([]);
 
@@ -448,31 +790,48 @@ export default defineComponent({
     const tabs = computed(() => [
       {
         value: "allFields",
-        label: "All Fields",
+        label: `All Fields (${indexData.value.schema.length})`,
         disabled: false,
       },
       {
         value: "schemaFields",
-        label: "User Defined Schema",
+        label: `User Defined Schema (${indexData.value.defined_schema_fields.length})`,
         disabled: !hasUserDefinedSchema.value,
+      },
+    ]);
+    const mainTabs = computed(() => [
+      {
+        value: "schemaSettings",
+        label: `Schema Settings`,
+        disabled: false,
+      },
+      {
+        value: "redButton",
+        label: `Extended Retention`,
+        disabled: false,
       },
     ]);
 
     const streamIndexType = [
-      { label: "Inverted Index", value: "fullTextSearchKey" },
+      { label: "Full text search", value: "fullTextSearchKey" },
+      { label: "Secondary index", value: "secondaryIndexKey" },
       { label: "Bloom filter", value: "bloomFilterKey" },
       { label: "KeyValue partition", value: "keyPartition" },
+      { label: "Prefix partition", value: "prefixPartition" },
+
       { label: "Hash partition (8 Buckets)", value: "hashPartition_8" },
       { label: "Hash partition (16 Buckets)", value: "hashPartition_16" },
       { label: "Hash partition (32 Buckets)", value: "hashPartition_32" },
       { label: "Hash partition (64 Buckets)", value: "hashPartition_64" },
       { label: "Hash partition (128 Buckets)", value: "hashPartition_128" },
     ];
-    const { getStream } = useStreams();
+    const { getStream, getUpdatedSettings } = useStreams();
 
     onBeforeMount(() => {
       dataRetentionDays.value = store.state.zoConfig.data_retention_days || 0;
-      maxQueryRange.value =  0;
+      maxQueryRange.value = 0;
+      storeOriginalData.value = false;
+      approxPartition.value = false;
     });
 
     const isSchemaEvolutionEnabled = computed(() => {
@@ -482,16 +841,13 @@ export default defineComponent({
     const markFormDirty = () => {
       formDirtyFlag.value = true;
     };
-
-   
-
     const deleteFields = async () => {
       loadingState.value = true;
       await streamService
         .deleteFields(
           store.state.selectedOrganization.identifier,
           indexData.value.name,
-          selectedFields.value.map((field) => field.name)
+          selectedFields.value.map((field) => field.name),
         )
         .then(async (res) => {
           loadingState.value = false;
@@ -507,7 +863,7 @@ export default defineComponent({
               indexData.value.name,
               indexData.value.stream_type,
               true,
-              true
+              true,
             );
             getSchema();
           } else {
@@ -541,6 +897,13 @@ export default defineComponent({
       }
 
       if (
+        settings.index_fields.length > 0 &&
+        settings.index_fields.includes(property.name)
+      ) {
+        fieldIndices.push("secondaryIndexKey");
+      }
+
+      if (
         settings.bloom_filter_fields.length > 0 &&
         settings.bloom_filter_fields.includes(property.name)
       ) {
@@ -552,16 +915,17 @@ export default defineComponent({
       if (
         settings.partition_keys &&
         Object.values(settings.partition_keys).some(
-          (v) => !v.disabled && v.field === property.name
+          (v) => !v.disabled && v.field === property.name,
         )
       ) {
         const [level, partition] = Object.entries(settings.partition_keys).find(
-          ([, partition]) => partition["field"] === property.name
+          ([, partition]) => partition["field"] === property.name,
         );
 
         property.level = level;
 
         if (partition.types === "value") fieldIndices.push("keyPartition");
+        if (partition.types === "prefix") fieldIndices.push("prefixPartition");
 
         if (partition.types?.hash)
           fieldIndices.push(`hashPartition_${partition.types.hash}`);
@@ -574,6 +938,13 @@ export default defineComponent({
 
     const setSchema = (streamResponse) => {
       const schemaMapping = new Set([]);
+
+      if (streamResponse?.settings) {
+        // console.log("streamResponse:", streamResponse);
+        previousSchemaVersion = JSON.parse(
+          JSON.stringify(streamResponse.settings),
+        );
+      }
       if (!streamResponse.schema?.length) {
         streamResponse.schema = [];
         if (streamResponse.settings.defined_schema_fields?.length)
@@ -584,6 +955,19 @@ export default defineComponent({
               index_type: [],
             });
           });
+      }
+      if (Array.isArray(streamResponse.settings.extended_retention_days)) {
+        redBtnRows.value = [];
+        indexData.value.extended_retention_days = streamResponse.settings.extended_retention_days;
+        streamResponse.settings.extended_retention_days.forEach((field, index) => {
+          redBtnRows.value.push({
+            index: index,
+            original_start: field.start,
+            original_end: field.end,
+            start: convertUnixToQuasarFormat(field.start),
+            end: convertUnixToQuasarFormat(field.end),
+          });
+        });
       }
 
       if (
@@ -600,11 +984,11 @@ export default defineComponent({
 
       indexData.value.stats.doc_time_max = date.formatDate(
         parseInt(streamResponse.stats.doc_time_max) / 1000,
-        "YYYY-MM-DDTHH:mm:ss:SSZ"
+        "YYYY-MM-DD THH:mm:ss:SS Z",
       );
       indexData.value.stats.doc_time_min = date.formatDate(
         parseInt(streamResponse.stats.doc_time_min) / 1000,
-        "YYYY-MM-DDTHH:mm:ss:SSZ"
+        "YYYY-MM-DD THH:mm:ss:SS Z",
       );
 
       indexData.value.defined_schema_fields =
@@ -614,8 +998,12 @@ export default defineComponent({
         dataRetentionDays.value =
           streamResponse.settings.data_retention ||
           store.state.zoConfig.data_retention_days;
+      calculateDateRange();
 
-      maxQueryRange.value = streamResponse.settings.max_query_range || 0;  
+      maxQueryRange.value = streamResponse.settings.max_query_range || 0;
+      storeOriginalData.value =
+        streamResponse.settings.store_original_data || false;
+      approxPartition.value = streamResponse.settings.approx_partition || false;
 
       if (!streamResponse.schema) {
         loadingState.value = false;
@@ -660,7 +1048,14 @@ export default defineComponent({
 
       await getStream(indexData.value.name, indexData.value.stream_type, true)
         .then((streamResponse) => {
+          streamResponse = updateStreamResponse(streamResponse);
           setSchema(streamResponse);
+          if (activeTab.value === "schemaFields") {
+            resultTotal.value =
+              streamResponse.settings?.defined_schema_fields?.length;
+          } else {
+            resultTotal.value = streamResponse.schema?.length;
+          }
           loadingState.value = false;
           dismiss();
         })
@@ -673,11 +1068,12 @@ export default defineComponent({
     const onSubmit = async () => {
       let settings = {
         partition_keys: [],
+        index_fields: [],
         full_text_search_keys: [],
         bloom_filter_fields: [],
         defined_schema_fields: [...indexData.value.defined_schema_fields],
+        extended_retention_days: [...indexData.value.extended_retention_days],
       };
-
       if (showDataRetention.value && dataRetentionDays.value < 1) {
         q.notify({
           color: "negative",
@@ -689,26 +1085,51 @@ export default defineComponent({
       }
       if (Number(maxQueryRange.value) > 0) {
         settings["max_query_range"] = Number(maxQueryRange.value);
+      } else {
+        settings["max_query_range"] = 0;
       }
-      
+
       if (showDataRetention.value) {
         settings["data_retention"] = Number(dataRetentionDays.value);
+        calculateDateRange();
       }
-    
+
+      settings["store_original_data"] = storeOriginalData.value;
+      settings["approx_partition"] = approxPartition.value;
+
       const newSchemaFieldsSet = new Set(
         newSchemaFields.value.map((field) =>
-          field.name.trim().toLowerCase().replace(/ /g, "_").replace(/-/g, "_")
-        )
+          field.name.trim().toLowerCase().replace(/ /g, "_").replace(/-/g, "_"),
+        ),
       );
-
       // Push unique and normalized field names to settings.defined_schema_fields
       settings.defined_schema_fields.push(...newSchemaFieldsSet);
+
+      redDaysList.value.forEach((field) => {
+        settings.extended_retention_days.push({
+          start: field.start,
+          end: field.end,
+        });
+      });
+      if (selectedDateFields.value.length > 0) {
+        selectedDateFields.value.forEach((field) => {
+          // Filter out the items only if both start and end match
+          settings.extended_retention_days = settings.extended_retention_days.filter((item) => {
+            return !(item.start === field.start && item.end === field.end);
+            });
+        });
+      };
+
 
       let added_part_keys = [];
       for (var property of indexData.value.schema) {
         property.index_type?.forEach((index: string) => {
           if (index === "fullTextSearchKey") {
             settings.full_text_search_keys.push(property.name);
+          }
+
+          if (index === "secondaryIndexKey") {
+            settings.index_fields.push(property.name);
           }
 
           if (property.level && index === "keyPartition") {
@@ -720,6 +1141,18 @@ export default defineComponent({
             added_part_keys.push({
               field: property.name,
               types: "value",
+            });
+          }
+
+          if (property.level && index === "prefixPartition") {
+            settings.partition_keys.push({
+              field: property.name,
+              types: "prefix",
+            });
+          } else if (index === "prefixPartition") {
+            added_part_keys.push({
+              field: property.name,
+              types: "prefix",
             });
           }
 
@@ -752,27 +1185,37 @@ export default defineComponent({
         settings.partition_keys =
           settings.partition_keys.concat(added_part_keys);
       }
-
       loadingState.value = true;
 
       newSchemaFields.value = [];
 
+      redDaysList.value = [];
+
+      selectedDateFields.value = [];
+
+      let modifiedSettings = getUpdatedSettings(
+        previousSchemaVersion,
+        settings,
+      );
       await streamService
         .updateSettings(
           store.state.selectedOrganization.identifier,
           indexData.value.name,
           indexData.value.stream_type,
-          settings
+          modifiedSettings,
         )
         .then(async (res) => {
           await getStream(
             indexData.value.name,
             indexData.value.stream_type,
             true,
-            true
+            true,
           ).then((streamResponse) => {
+            formDirtyFlag.value = false;
+            streamResponse = updateStreamResponse(streamResponse);
             setSchema(streamResponse);
             loadingState.value = false;
+            isDialogOpen.value = false;
             q.notify({
               color: "positive",
               message: "Stream settings updated successfully.",
@@ -805,13 +1248,13 @@ export default defineComponent({
     });
 
     const showFullTextSearchColumn = computed(
-      () => modelValue.stream_type !== "enrichment_tables"
+      () => modelValue.stream_type !== "enrichment_tables",
     );
 
     const showDataRetention = computed(
       () =>
         !!(store.state.zoConfig.data_retention_days || false) &&
-        modelValue.stream_type !== "enrichment_tables"
+        modelValue.stream_type !== "enrichment_tables",
     );
 
     const disableOptions = (schema, option) => {
@@ -827,15 +1270,28 @@ export default defineComponent({
       }
 
       if (
+        selectedIndices.includes("prefixPartition") &&
+        option.value.includes("keyPartition")
+      ) {
+        return true;
+      }
+      if (
+        selectedIndices.includes("keyPartition") &&
+        option.value.includes("prefixPartition")
+      ) {
+        return true;
+      }
+      if (
         selectedIndices.includes("hashPartition") &&
         selectedHashPartition !== option.value &&
         (option.value.includes("hashPartition") ||
-          option.value.includes("keyPartition"))
+          option.value.includes("keyPartition") ||
+          option.value.includes("prefixPartition"))
       )
         return true;
-
       if (
-        selectedIndices.includes("keyPartition") &&
+        (selectedIndices.includes("keyPartition") ||
+          selectedIndices.includes("prefixPartition")) &&
         option.value.includes("hashPartition")
       )
         return true;
@@ -876,18 +1332,50 @@ export default defineComponent({
         label: t("logStream.propertyName"),
         align: "center",
         sortable: true,
+        field: "name",
+      },
+      {
+        name: "settings",
+        align: "left",
+        sortable: true,
+        field: "isUserDefined",
+        icon: "settings",
+        sort: (a, b) => {
+          // Ensure `isUserDefined` is properly handled
+          if (a && !b) return -1; // `a` comes first
+          if (!a && b) return 1; // `b` comes first
+          return 0; // No change in order
+        },
       },
       {
         name: "type",
         label: t("logStream.propertyType"),
-        align: "center",
+        align: "left",
         sortable: true,
+        field: "type",
       },
       {
         name: "index_type",
         label: t("logStream.indexType"),
-        align: "center",
+        align: "left",
         sortable: false,
+      },
+    ];
+
+    const redBtnColumns = [
+      {
+        name: "start",
+        label: t("logStream.extendedStartDate"),
+        align: "center",
+        sortable: true,
+        field: "start",
+      },
+      {
+        name: "end",
+        label: t("logStream.extendedEndDate"),
+        align: "center",
+        sortable: true,
+        field: "end",
       },
     ];
 
@@ -902,6 +1390,10 @@ export default defineComponent({
 
     const removeSchemaField = (field: any, index: number) => {
       newSchemaFields.value.splice(index, 1);
+      if (newSchemaFields.value.length === 0) {
+        isDialogOpen.value = false;
+        newSchemaFields.value = [];
+      }
     };
 
     const scrollToAddFields = () => {
@@ -913,19 +1405,33 @@ export default defineComponent({
 
     const updateActiveTab = (tab) => {
       activeTab.value = tab;
+      if (tab === "schemaFields") {
+        resultTotal.value = indexData.value.defined_schema_fields.length;
+      } else {
+        resultTotal.value = indexData.value.schema.length;
+      }
+    };
+    const updateActiveMainTab = (tab) => {
+      activeMainTab.value = tab;
     };
 
     const updateDefinedSchemaFields = () => {
       markFormDirty();
 
       const selectedFieldsSet = new Set(
-        selectedFields.value.map((field) => field.name)
+        selectedFields.value.map((field) => field.name),
       );
+
+      if (selectedFieldsSet.has(allFieldsName.value))
+        selectedFieldsSet.delete(allFieldsName.value);
+
+      if (selectedFieldsSet.has(store.state.zoConfig.timestamp_column))
+        selectedFieldsSet.delete(store.state.zoConfig.timestamp_column);
 
       if (activeTab.value === "schemaFields") {
         indexData.value.defined_schema_fields =
           indexData.value.defined_schema_fields.filter(
-            (field) => !selectedFieldsSet.has(field)
+            (field) => !selectedFieldsSet.has(field),
           );
 
         if (!indexData.value.defined_schema_fields.length) {
@@ -942,16 +1448,139 @@ export default defineComponent({
 
       selectedFields.value = [];
     };
+    const updateStreamResponse = (streamResponse) => {
+      if (streamResponse.settings.hasOwnProperty("defined_schema_fields")) {
+        const userDefinedSchema = streamResponse.settings.defined_schema_fields;
 
-    const onSelection = () => { };
+        // Map through the schema and add `isUserDefined` field
+        const updatedSchema = streamResponse.schema.map((field) => ({
+          ...field,
+          isUserDefined: userDefinedSchema.includes(field.name), // Mark true if in userDefinedSchema
+        }));
+
+        // Find fields in userDefinedSchema that are not in the schema
+        const additionalFields = userDefinedSchema
+          .filter(
+            (name) =>
+              !streamResponse.schema.some((field) => field.name === name),
+          )
+          .map((name) => ({
+            name,
+            isUserDefined: true,
+            // Optionally, add default values for other properties (e.g., type, index_type, etc.)
+          }));
+
+        // Combine the updated schema with additional fields
+        streamResponse.schema = [...updatedSchema, ...additionalFields];
+      }
+      updateResultTotal(streamResponse);
+      return streamResponse;
+    };
+    const closeDialog = () => {
+      isDialogOpen.value = false;
+      newSchemaFields.value = [];
+    };
+
+    const openDialog = () => {
+      isDialogOpen.value = true;
+      formDirtyFlag.value = true;
+      newSchemaFields.value = [
+        {
+          name: "",
+          type: "",
+          index_type: [],
+        },
+      ];
+    };
+    const updateResultTotal = (streamResponse) => {
+      if (activeTab.value === "schemaFields") {
+        resultTotal.value =
+          streamResponse.settings?.defined_schema_fields?.length;
+      } else {
+        resultTotal.value = streamResponse.schema?.length;
+      }
+    };
+    function convertUnixToQuasarFormat(unixMicroseconds: any) {
+      if (!unixMicroseconds) return "";
+      const unixSeconds = unixMicroseconds / 1e6;
+      const dateToFormat = new Date(unixSeconds * 1000);
+      const formattedDate = dateToFormat.toISOString();
+      return date.formatDate(formattedDate, "DD-MM-YYYY");
+
+    }
+    function formatDate(dateString) {
+      const date = new Date(dateString); // Convert to Date object
+      const day = String(date.getDate()).padStart(2, '0'); // Get day with leading zero
+      const month = String(date.getMonth() + 1).padStart(2, '0'); // Get month with leading zero
+      const year = date.getFullYear(); // Get the full year
+      
+      return `${day}-${month}-${year}`; // Return formatted date
+    }
 
 
 
+
+
+
+
+
+
+    const dateChangeValue = (value) => {
+
+      const selectedFromDate = value.hasOwnProperty('selectedDate') && formatDate(value.selectedDate.from)
+      const selectedToDate =value.hasOwnProperty('selectedDate') && formatDate(value.selectedDate.to)
+      if (value.relativeTimePeriod == null) {
+        try {
+            const startTimestamp = convertDateToTimestamp(selectedFromDate, "00:00", 'UTC').timestamp;
+            const endTimestamp = convertDateToTimestamp(selectedToDate, "00:00", 'UTC').timestamp;
+            
+            if (startTimestamp && endTimestamp) {
+              redDaysList.value.push({
+                start: startTimestamp,
+                end: endTimestamp,
+              });
+              onSubmit();
+            }
+          } catch (error) {
+            console.error('Error processing date selection:', error);
+          }
+      }
+    };
+    const calculateDateRange = () => {
+      const today = new Date();
+      const currentDate = new Date(today);
+      currentDate.setDate(today.getDate() - (dataRetentionDays.value - 1)); // Adjust to the desired number of days (dataRetentionDays of  days in this case)
+
+      const formattedDate = timestampToTimezoneDate(
+        new Date().getTime(), // Current timestamp
+        store.state.timezone, // Get the timezone from the store
+        "yyyy/MM/dd", // Desired format
+      );
+      // Format minDate using timestampToTimezoneDate for a custom format
+      minDate.value = timestampToTimezoneDate(
+        currentDate.getTime(),
+        store.state.timezone,
+        "yyyy/MM/dd", // Desired format
+      );
+    };
+
+
+    const deleteDates = () => {
+      selectedDateFields.value = selectedDateFields.value.map((field) => {
+        return {
+          start: field.original_start,
+          end: field.original_end,
+        };
+      });
+      formDirtyFlag.value = true;
+      onSubmit();
+      };
 
     return {
       t,
       q,
       store,
+      dateChangeValue,
       isCloud,
       indexData,
       getSchema,
@@ -962,10 +1591,13 @@ export default defineComponent({
       showFullTextSearchColumn,
       getImageURL,
       dataRetentionDays,
+      storeOriginalData,
+      approxPartition,
       maxQueryRange,
       showDataRetention,
       formatSizeFromMB,
       confirmQueryModeChangeDialog,
+      confirmDeleteDatesDialog,
       deleteFields,
       markFormDirty,
       formDirtyFlag,
@@ -988,7 +1620,30 @@ export default defineComponent({
       updateDefinedSchemaFields,
       selectedFields,
       allFieldsName,
-      onSelection,
+      updateStreamResponse,
+      isDialogOpen,
+      closeDialog,
+      resultTotal,
+      perPageOptions,
+      changePagination,
+      selectedPerPage,
+      pagination,
+      qTable,
+      outlinedPerson,
+      outlinedSchema,
+      outlinedDelete,
+      openDialog,
+      calculateDateRange,
+      minDate,
+      mainTabs,
+      activeMainTab,
+      updateActiveMainTab,
+      redBtnColumns,
+      redBtnRows,
+      selectedDateFields,
+      redDaysList,
+      deleteDates,
+      IsdeleteBtnVisible,
     };
   },
   created() {
@@ -1006,6 +1661,9 @@ export default defineComponent({
 </script>
 
 <style lang="scss" scoped>
+.q-card__section--vert {
+  padding: 8px 16px;
+}
 .indexDetailsContainer {
   padding: 1.25rem;
   width: 100%;
@@ -1015,12 +1673,20 @@ export default defineComponent({
     font-weight: 700;
   }
 
+  .titleContainer {
+    background-color: #00000005;
+    border: 1px solid $input-field-border-color;
+    border-radius: 5px;
+    padding: 1rem;
+  }
+
   .q-table {
     border: 1px solid $input-field-border-color;
   }
 
   .q-table {
     border-radius: 0.5rem;
+    position: relative;
 
     thead tr {
       height: 2.5rem;
@@ -1090,13 +1756,58 @@ export default defineComponent({
   }
 
   .data-retention-input {
+    border: 1px solid $input-field-border-color;
+    border-radius: 0.2rem;
+    width: 80px;
+    height: 39px;
     &.q-field {
       padding-bottom: 0 !important;
     }
-    .q-field__bottom {
-      padding: 8px 0;
+  }
+}
+
+.mapping-warning-msg {
+  background-color: #f9f290;
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: 1px solid #f5a623;
+  color: #865300;
+}
+
+.q-item {
+  padding: 3px 8px;
+  margin: 0 8px;
+  border-radius: 6px;
+
+  /* Overriding default height */
+  min-height: 30px;
+
+  &.q-router-link--active {
+    background-color: $primary;
+    color: white;
+
+    &::before {
+      content: " ";
+
+      position: absolute;
+      top: 0;
+      background-color: inherit;
     }
   }
+
+  &.ql-item-mini {
+    margin: 0;
+
+    &::before {
+      display: none;
+    }
+  }
+}
+
+.q-item__section--avatar {
+  margin: 0;
+  padding: 0;
+  min-width: 40px;
 }
 
 // .sticky-buttons {
@@ -1132,9 +1843,18 @@ export default defineComponent({
 //     box-shadow: 6px 6px 18px var(--q-dark);
 //   }
 // }
+.single-line-tab {
+  display: inline-flex;
+}
 </style>
 
 <style lang="scss">
+.add-fields-card {
+  width: 100vw;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+}
 .stream-schema-index-select {
   .q-field__control {
     .q-field__control-container {
@@ -1156,10 +1876,30 @@ export default defineComponent({
     width: 100%;
   }
 
+  .q-table {
+    td:nth-child(2) {
+      min-width: 20rem;
+      width: 20rem;
+      max-width: 20rem;
+      overflow: auto;
+      scrollbar-width: thin;
+      scrollbar-color: #999 #f0f0f0;
+    }
+    td:nth-child(3) {
+      padding: 4px 8px !important;
+    }
+  }
+
   th:first-child,
   td:first-child {
     padding-left: 8px !important;
   }
+}
+.dark-theme-table tr:hover td:nth-child(2) {
+  background-color: #272a2b !important;
+}
+.light-theme-table tr:hover td:nth-child(2) {
+  background-color: #f7f7f7 !important;
 }
 
 .schema-fields-tabs {
@@ -1174,5 +1914,40 @@ export default defineComponent({
       color: #ffffff !important;
     }
   }
+}
+.main-fields-tabs {
+  height: fit-content;
+  color: var(--q-light);
+  .rum-tab {
+    padding: 4px 12px !important;
+
+    &.active {
+      color: white !important;
+      border-bottom: 5px solid var(--q-primary) !important;
+      background-color: rgba(88, 96, 178, 0.6);
+    }
+  }
+}
+.floating-buttons {
+  position: sticky;
+  bottom: 0;
+  top: 0;
+  z-index: 1; /* Ensure it stays on top of table content */
+  width: 100%;
+}
+.dark-theme {
+  background-color: var(--q-light);
+  backdrop-filter: blur(10px);
+}
+.light-theme {
+  background-color: var(--q-light);
+  backdrop-filter: blur(10px);
+}
+
+.warning-text {
+  color: #f5a623;
+  border: 1px solid #f5a623;
+  border-radius: 10px;
+  padding: 6px 3px;
 }
 </style>

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -39,9 +39,11 @@ impl FileStatisticsCache {
             max_entries,
         }
     }
+
     pub fn len(&self) -> usize {
         self.statistics.len()
     }
+
     fn format_key(&self, k: &Path) -> String {
         if let Some(mut p) = k.as_ref().find("/$$/") {
             if let Some(pp) = k.as_ref()[..p].find("/schema=") {
@@ -107,8 +109,9 @@ impl CacheAccessor<Path, Arc<Statistics>> for FileStatisticsCache {
         let k = self.format_key(k);
         let mut w = self.cacher.lock();
         if w.len() >= self.max_entries {
-            // release 5% of the cache
-            for _ in 0..(self.max_entries / 20) {
+            // release 10% of the cache
+            log::warn!("FileStatisticsCache is full, releasing 10% of the cache");
+            for _ in 0..(self.max_entries / 10) {
                 if let Some(k) = w.pop_front() {
                     self.statistics.remove(&k);
                 } else {
@@ -123,7 +126,7 @@ impl CacheAccessor<Path, Arc<Statistics>> for FileStatisticsCache {
 
     fn remove(&mut self, k: &Path) -> Option<Arc<Statistics>> {
         let k = self.format_key(k);
-        self.statistics.remove(&k).map(|x| x.1.1)
+        self.statistics.remove(&k).map(|x| x.1 .1)
     }
 
     fn contains_key(&self, k: &Path) -> bool {

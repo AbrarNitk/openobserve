@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -27,14 +27,16 @@ const API_ENDPOINT = import.meta.env.VITE_OPENOBSERVE_ENDPOINT
     ? import.meta.env.VITE_OPENOBSERVE_ENDPOINT.slice(0, -1)
     : import.meta.env.VITE_OPENOBSERVE_ENDPOINT
   : window.location.origin == "http://localhost:8081"
-  ? "/"
-  : pos > -1
-  ? window.location.origin + window.location.pathname.slice(0, pos)
-  : window.location.origin;
+    ? "/"
+    : pos > -1
+      ? window.location.origin + window.location.pathname.slice(0, pos)
+      : window.location.origin;
 
 const organizationObj = {
   organizationPasscode: "",
   allDashboardList: {},
+  allDashboardData: {},
+  allDashboardListHash: {},
   rumToken: {
     rum_token: "",
   },
@@ -44,6 +46,8 @@ const organizationObj = {
   folders: [],
   organizationSettings: {
     scrape_interval: 15,
+    trace_id_field_name: "trace_id",
+    span_id_field_name: "span_id",
   },
   isDataIngested: false,
 };
@@ -62,7 +66,7 @@ export default createStore({
     theme: "",
     printMode: false,
     organizationData: JSON.parse(JSON.stringify(organizationObj)),
-    zoConfig: {},
+    zoConfig: <{ [key: string]: any }>{},
     timezone: useLocalTimezone()
       ? useLocalTimezone()
       : Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -71,6 +75,9 @@ export default createStore({
     savedViewFlag: false,
     savedFunctionDialog: false,
     regionInfo: [],
+    hiddenMenus: [],
+    sessionId: "",
+    webSocketUrl: "",
   },
   mutations: {
     login(state, payload) {
@@ -121,6 +128,12 @@ export default createStore({
     // },
     setAllDashboardList(state, payload) {
       state.organizationData.allDashboardList = payload;
+    },
+    setDashboardData(state, payload) {
+      state.organizationData.allDashboardData = payload;
+    },
+    setAllDashboardListHash(state, payload) {
+      state.organizationData.allDashboardListHash = payload;
     },
     setOrganizationSettings(state, payload) {
       state.organizationData.organizationSettings = payload;
@@ -179,6 +192,9 @@ export default createStore({
     setRegionInfo(state, payload) {
       state.regionInfo = payload;
     },
+    setHiddenMenus(state, payload) {
+      state.hiddenMenus = payload;
+    },
   },
   actions: {
     login(context, payload) {
@@ -189,6 +205,9 @@ export default createStore({
     },
     endpoint(context, payload) {
       context.commit("endpoint", payload);
+    },
+    setUserInfo(context, payload) {
+      context.commit("setUserInfo", payload);
     },
     // setIndexData(context, payload) {
     //   context.commit("setIndexData", payload);
@@ -222,6 +241,12 @@ export default createStore({
     // },
     setAllDashboardList(context, payload) {
       context.commit("setAllDashboardList", payload);
+    },
+    setDashboardData(context, payload) {
+      context.commit("setDashboardData", payload);
+    },
+    setAllDashboardListHash(context, payload) {
+      context.commit("setAllDashboardListHash", payload);
     },
     setOrganizationSettings(context, payload) {
       context.commit("setOrganizationSettings", payload);
@@ -279,6 +304,9 @@ export default createStore({
     },
     setRegionInfo(context, payload) {
       context.commit("setRegionInfo", payload);
+    },
+    setHiddenMenus(context, payload) {
+      context.commit("setHiddenMenus", payload);
     },
   },
   modules: {},

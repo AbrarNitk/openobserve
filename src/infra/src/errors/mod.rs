@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -28,6 +28,10 @@ pub enum Error {
     DbError(#[from] DbError),
     #[error("EtcdError# {0}")]
     EtcdError(#[from] etcd_client::Error),
+    #[error("FromStrError# {0}")]
+    FromStrError(#[from] FromStrError),
+    #[error("FromI16Error# {0}")]
+    FromI16Error(#[from] FromI16Error),
     #[error("SerdeJsonError# {0}")]
     SerdeJsonError(#[from] json::Error),
     #[error("ArrowError# {0}")]
@@ -79,11 +83,69 @@ pub enum Error {
 unsafe impl Send for Error {}
 
 #[derive(ThisError, Debug)]
+#[error("cannot parse \"{value}\" as {ty}")]
+pub struct FromStrError {
+    pub value: String,
+    pub ty: String,
+}
+
+#[derive(ThisError, Debug)]
+#[error("cannot convert \"{value}\" to {ty}")]
+pub struct FromI16Error {
+    pub value: i16,
+    pub ty: String,
+}
+
+#[derive(ThisError, Debug)]
 pub enum DbError {
     #[error("key {0} does not exist")]
     KeyNotExists(String),
     #[error("error {0} performing operation on key {1}")]
     DBOperError(String, String),
+    #[error("Unique constraint violation")]
+    UniqueViolation,
+    #[error("SeaORMError# {0}")]
+    SeaORMError(String),
+    #[error("error getting dashboard")]
+    GetDashboardError(#[from] GetDashboardError),
+    #[error("PutDashbord# {0}")]
+    PutDashboard(#[from] PutDashboardError),
+    #[error("PutAlert# {0}")]
+    PutAlert(#[from] PutAlertError),
+}
+
+#[derive(ThisError, Debug)]
+pub enum GetDashboardError {
+    #[error("dashboard in DB has version {0} which cannot be deserialized")]
+    UnsupportedVersion(i32),
+}
+
+#[derive(ThisError, Debug)]
+pub enum PutDashboardError {
+    #[error("error putting dashboard with folder that does not exist")]
+    FolderDoesNotExist,
+    #[error("error putting dashboard with missing dashboard_id")]
+    MissingDashboardId,
+    #[error("error putting dashboard with missing title")]
+    MissingTitle,
+    #[error("error putting dashboard with missing owner")]
+    MissingOwner,
+    #[error("error putting dashboard with missing inner data for version {0}")]
+    MissingInnerData(i32),
+}
+
+#[derive(ThisError, Debug)]
+pub enum PutAlertError {
+    #[error("cannot provide alert ID when creating an alert")]
+    CreateAlertSetID,
+    #[error("must provide alert ID when updating an alert")]
+    UpdateAlertMissingID,
+    #[error("alert to update not found")]
+    UpdateAlertNotFound,
+    #[error("error putting alert with folder that does not exist")]
+    FolderDoesNotExist,
+    #[error("cannot convert {0} into a trigger threshold operator")]
+    IntoTriggerThresholdOperator(config::meta::alerts::Operator),
 }
 
 #[derive(ThisError, Debug)]
@@ -98,6 +160,26 @@ pub enum ErrorCodes {
     SearchFieldHasNoCompatibleDataType(String),
     SearchSQLExecuteError(String),
     SearchCancelQuery(String),
+    SearchTimeout(String),
+    InvalidParams(String),
+}
+
+impl From<sea_orm::DbErr> for Error {
+    fn from(value: sea_orm::DbErr) -> Self {
+        Error::DbError(DbError::SeaORMError(value.to_string()))
+    }
+}
+
+impl From<GetDashboardError> for Error {
+    fn from(value: GetDashboardError) -> Self {
+        Error::DbError(value.into())
+    }
+}
+
+impl From<PutDashboardError> for Error {
+    fn from(value: PutDashboardError) -> Self {
+        Error::DbError(value.into())
+    }
 }
 
 impl std::fmt::Display for ErrorCodes {
@@ -123,7 +205,9 @@ impl ErrorCodes {
             ErrorCodes::SearchParquetFileNotFound => 20006,
             ErrorCodes::SearchFieldHasNoCompatibleDataType(_) => 20007,
             ErrorCodes::SearchSQLExecuteError(_) => 20008,
-            ErrorCodes::SearchCancelQuery(_) => 429,
+            ErrorCodes::SearchCancelQuery(_) => 20009,
+            ErrorCodes::SearchTimeout(_) => 20010,
+            ErrorCodes::InvalidParams(_) => 20011,
         }
     }
 
@@ -146,9 +230,9 @@ impl ErrorCodes {
                 format!("Search field has no compatible data type: {field}")
             }
             ErrorCodes::SearchSQLExecuteError(_) => "Search SQL execute error".to_string(),
-            ErrorCodes::SearchCancelQuery(_) => {
-                "Search query was cancelled by the administrator".to_string()
-            }
+            ErrorCodes::SearchCancelQuery(_) => "Search query was cancelled".to_string(),
+            ErrorCodes::SearchTimeout(_) => "Search query timed out".to_string(),
+            ErrorCodes::InvalidParams(_) => "Invalid parameters".to_string(),
         }
     }
 
@@ -164,6 +248,8 @@ impl ErrorCodes {
             ErrorCodes::SearchFieldHasNoCompatibleDataType(field) => field.to_owned(),
             ErrorCodes::SearchSQLExecuteError(msg) => msg.to_owned(),
             ErrorCodes::SearchCancelQuery(msg) => msg.to_owned(),
+            ErrorCodes::SearchTimeout(msg) => msg.to_owned(),
+            ErrorCodes::InvalidParams(msg) => msg.to_owned(),
         }
     }
 
@@ -179,6 +265,8 @@ impl ErrorCodes {
             ErrorCodes::SearchFieldHasNoCompatibleDataType(_) => "".to_string(),
             ErrorCodes::SearchSQLExecuteError(msg) => msg.to_owned(),
             ErrorCodes::SearchCancelQuery(msg) => msg.to_string(),
+            ErrorCodes::SearchTimeout(msg) => msg.to_owned(),
+            ErrorCodes::InvalidParams(msg) => msg.to_owned(),
         }
     }
 
@@ -226,6 +314,8 @@ impl ErrorCodes {
             20006 => Ok(ErrorCodes::SearchParquetFileNotFound),
             20007 => Ok(ErrorCodes::SearchFieldHasNoCompatibleDataType(message)),
             20008 => Ok(ErrorCodes::SearchSQLExecuteError(message)),
+            20009 => Ok(ErrorCodes::SearchCancelQuery(message)),
+            20010 => Ok(ErrorCodes::SearchTimeout(message)),
             _ => Ok(ErrorCodes::ServerInternalError(json.to_string())),
         }
     }

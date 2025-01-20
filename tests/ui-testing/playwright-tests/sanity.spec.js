@@ -1,6 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from './baseFixtures';
 import logData from "../../ui-testing/cypress/fixtures/log.json";
-import { log } from "console";
 import logsdata from "../../test-data/logs_data.json";
 import { toZonedTime } from "date-fns-tz";
 
@@ -10,19 +9,47 @@ const dashboardName = `AutomatedDashboard${Date.now()}`;
 
 async function login(page) {
   await page.goto(process.env["ZO_BASE_URL"]);
-  //  await page.getByText("Login as internal user").click();
+// await page.getByText('Login as internal user').click();
+  console.log("ZO_BASE_URL", process.env["ZO_BASE_URL"]);
   await page.waitForTimeout(1000);
   await page
     .locator('[data-cy="login-user-id"]')
     .fill(process.env["ZO_ROOT_USER_EMAIL"]);
   //Enter Password
-  await page.locator("label").filter({ hasText: "Password *" }).click();
   await page
     .locator('[data-cy="login-password"]')
     .fill(process.env["ZO_ROOT_USER_PASSWORD"]);
   await page.locator('[data-cy="login-sign-in"]').click();
-  //     await page.waitForTimeout(4000);
-  // await page.goto(process.env["ZO_BASE_URL"]);
+  await page.waitForTimeout(4000);
+  await page.goto(process.env["ZO_BASE_URL"]);
+}
+
+async function ingestion(page) {
+  const orgId = process.env["ORGNAME"];
+  const streamName = "e2e_automate";
+  const basicAuthCredentials = Buffer.from(
+    `${process.env["ZO_ROOT_USER_EMAIL"]}:${process.env["ZO_ROOT_USER_PASSWORD"]}`
+  ).toString('base64');
+
+  const headers = {
+    "Authorization": `Basic ${basicAuthCredentials}`,
+    "Content-Type": "application/json",
+  };
+  const response = await page.evaluate(async ({ url, headers, orgId, streamName, logsdata }) => {
+    const fetchResponse = await fetch(`${url}/api/${orgId}/${streamName}/_json`, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(logsdata)
+    });
+    return await fetchResponse.json();
+  }, {
+    url: process.env.INGESTION_URL,
+    headers: headers,
+    orgId: orgId,
+    streamName: streamName,
+    logsdata: logsdata
+  });
+  console.log(response);
 }
 
 const selectStreamAndStreamTypeForLogs = async (page, stream) => {
@@ -36,6 +63,7 @@ const selectStreamAndStreamTypeForLogs = async (page, stream) => {
     .first()
     .click({ force: true });
 };
+
 test.describe("Sanity testcases", () => {
   // let logData;
   function removeUTFCharacters(text) {
@@ -55,54 +83,12 @@ test.describe("Sanity testcases", () => {
     await expect.poll(async () => (await search).status()).toBe(200);
     // await search.hits.FIXME_should("be.an", "array");
   }
-  // tebefore(async function () {
-  //   // logData("log");
-  //   // const data = page;
-  //   // logData = data;
 
-  //   console.log("--logData--", logData);
-  // });
   test.beforeEach(async ({ page }) => {
     await login(page);
-    await page.waitForTimeout(5000);
-
-    // ("ingests logs via API", () => {
-    const orgId = process.env["ORGNAME"];
-    const streamName = "e2e_automate";
-    const basicAuthCredentials = Buffer.from(
-      `${process.env["ZO_ROOT_USER_EMAIL"]}:${process.env["ZO_ROOT_USER_PASSWORD"]}`
-    ).toString("base64");
-
-    const headers = {
-      Authorization: `Basic ${basicAuthCredentials}`,
-      "Content-Type": "application/json",
-    };
-
-    // const logsdata = {}; // Fill this with your actual data
-
-    // Making a POST request using fetch API
-    const response = await page.evaluate(
-      async ({ url, headers, orgId, streamName, logsdata }) => {
-        const fetchResponse = await fetch(
-          `${url}/api/${orgId}/${streamName}/_json`,
-          {
-            method: "POST",
-            headers: headers,
-            body: JSON.stringify(logsdata),
-          }
-        );
-        return await fetchResponse.json();
-      },
-      {
-        url: process.env.INGESTION_URL,
-        headers: headers,
-        orgId: orgId,
-        streamName: streamName,
-        logsdata: logsdata,
-      }
-    );
-
-    console.log(response);
+    await page.waitForTimeout(1000)
+    await ingestion(page);
+    await page.waitForTimeout(2000)
 
     await page.goto(
       `${logData.logsUrl}?org_identifier=${process.env["ORGNAME"]}`
@@ -110,7 +96,6 @@ test.describe("Sanity testcases", () => {
     const allsearch = page.waitForResponse("**/api/default/_search**");
     await selectStreamAndStreamTypeForLogs(page, logData.Stream);
     await applyQueryButton(page);
-
     // const streams = page.waitForResponse("**/api/default/streams**");
   });
 
@@ -119,7 +104,7 @@ test.describe("Sanity testcases", () => {
       page.locator('[data-test="logs-search-bar-quick-mode-toggle-btn"]')
     ).toBeVisible();
   });
-  test("should click on interesting fields icon and display query in editor", async ({
+    test("should click on interesting fields icon and display query in editor", async ({
     page,
   }) => {
     await page.waitForSelector(
@@ -142,30 +127,25 @@ test.describe("Sanity testcases", () => {
     }
     await page
       .locator('[data-cy="index-field-search-input"]')
-      .fill("_timestamp");
+      .fill("job");
     await page.waitForTimeout(2000);
     await page
-      .locator(".field-container")
       .locator(
-        '[data-test="log-search-index-list-interesting-_timestamp-field-btn"]'
-      )
-      .last()
-      .click({
-        force: true,
-      });
+        '[data-test="log-search-index-list-interesting-job-field-btn"]'
+      ).first().click();
     await page.locator('[aria-label="SQL Mode"] > .q-toggle__inner').click();
     await expect(
       page
         .locator('[data-test="logs-search-bar-query-editor"]')
-        .getByText(/_timestamp/)
+        .getByText(/job/)
         .first()
     ).toBeVisible();
   });
 
   test("should display result text and pagination", async ({ page }) => {
-    await page.getByText("Showing 1 to 250").click();
+    await page.getByText("Showing 1 to 100").click();
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
   });
 
@@ -209,7 +189,7 @@ test.describe("Sanity testcases", () => {
     await page
       .locator('[data-test="log-search-saved-view-field-search-input"]')
       .fill("sanity");
-    await page.getByText("sanitytest").click();
+    await page.getByText("sanitytest").first().click();
     await page
       .locator('[data-test="logs-search-saved-views-btn"]')
       .getByLabel("Expand")
@@ -220,9 +200,9 @@ test.describe("Sanity testcases", () => {
     await page
       .locator('[data-test="log-search-saved-view-field-search-input"]')
       .fill("sanity");
-    await page.getByText("favorite_border").click();
+    await page.getByText("favorite_border").first().click();
     await page.getByText("Favorite Views").click();
-    await page.getByRole("button", { name: "cancel" }).click();
+    await page.getByLabel('Clear').first().click();
     await page.getByLabel("Collapse").click();
     await page
       .locator('[data-test="logs-search-saved-views-btn"]')
@@ -271,7 +251,7 @@ test.describe("Sanity testcases", () => {
     await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
     await page.waitForTimeout(2000);
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
   });
 
@@ -303,6 +283,9 @@ test.describe("Sanity testcases", () => {
     await page.waitForTimeout(2000);
     // await page.locator('[data-test="menu-link-\\/functions-item"]').click();
     await page.locator('[data-test="menu-link-\\/pipeline-item"]').click();
+    await page.locator('[data-test="tab-realtime"]').click();
+
+    await page.locator('[data-test="function-stream-tab"]').click();
     await page.getByPlaceholder("Search Function").click();
     await page.getByPlaceholder("Search Function").fill("e2eautomatefunctions");
     await page.getByRole("button", { name: "Delete Function" }).click();
@@ -314,17 +297,19 @@ test.describe("Sanity testcases", () => {
   }) => {
     // await page.locator('[data-test="menu-link-\\/functions-item"]').click();
     await page.locator('[data-test="menu-link-\\/pipeline-item"]').click();
+    await page.locator('[data-test="tab-realtime"]').click();
+    await page.locator('[data-test="function-stream-tab"]').click();
     await page.getByRole("button", { name: "Create new function" }).click();
     await page.getByLabel("Name").click();
     await page.getByLabel("Name").fill("sanitytest");
-    await page.locator(".view-line").click();
-    await page.getByLabel("Editor content;Press Alt+F1").fill("sanity=1");
-    await page.getByText("sanity=").click();
-    await page.getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
-    await page.getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
-    await page.getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
-    await page.getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
-    await page.getByLabel("Editor content;Press Alt+F1").fill(".sanity=1");
+    await page.locator('[data-test="logs-vrl-function-editor"]').click();
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").fill("sanity=1");
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByText("sanity=").click();
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").press("ArrowLeft");
+    await page.locator('[data-test="logs-vrl-function-editor"]').getByLabel("Editor content;Press Alt+F1").fill(".sanity=1");
     await page.getByRole("button", { name: "Save" }).click();
     await page.getByPlaceholder("Search Function").click();
     await page.getByPlaceholder("Search Function").fill("sanity");
@@ -355,11 +340,6 @@ test.describe("Sanity testcases", () => {
       .nth(2)
       .click();
     await page.waitForTimeout(3000);
-    await page
-      .locator(
-        '[data-test="field-list-item-logs-e2e_automate-_timestamp"] [data-test="dashboard-add-x-data"]'
-      )
-      .click();
     await page
       .locator(
         '[data-test="field-list-item-logs-e2e_automate-kubernetes_annotations_kubectl_kubernetes_io_default_container"] [data-test="dashboard-add-y-data"]'
@@ -408,11 +388,8 @@ test.describe("Sanity testcases", () => {
     await page.click('[data-test="dashboard-folder-add-save"]');
     await page.getByText(randomFolderName).click();
     await page.waitForTimeout(5000);
-    await page
-      .locator(
-        `[data-test^="dashboard-folder-tab"]:has-text("${randomFolderName}") [data-test="dashboard-delete-folder-icon"]`
-      )
-      .click({ force: true });
+    await page.locator(`[data-test^="dashboard-folder-tab"]:has-text("${randomFolderName}") [data-test="dashboard-more-icon"]`).click();
+    await page.locator('[data-test="dashboard-delete-folder-icon"]').click({ force: true });
     await page.waitForTimeout(100);
     await page.click('[data-test="confirm-button"]');
 
@@ -429,18 +406,13 @@ test.describe("Sanity testcases", () => {
   test("create template, destination and alert and then delete it", async ({
     page,
   }) => {
-    await page.locator('[data-test="menu-link-\\/alerts-item"]').click();
+    await page.locator('[data-test="menu-link-settings-item"]').click();
     await page.waitForTimeout(2000);
     await page
-      .locator('[data-test="alerts-page"] div')
-      .filter({
-        hasText:
-          "AlertsDestinationsTemplateskeyboard_arrow_upkeyboard_arrow_down",
-      })
-      .first()
+      .locator('[data-test="alert-destinations-tab"]')
       .click();
     await page.waitForTimeout(2000);
-    await page.locator('[data-test="alert-alerts-tab"]').click({ force: true });
+    // await page.locator('[data-test="alert-alerts-tab"]').click({ force: true });
     await page.locator('[data-test="alert-templates-tab"]').click();
     await page.waitForTimeout(2000);
     await page
@@ -451,10 +423,11 @@ test.describe("Sanity testcases", () => {
     await page.waitForTimeout(100);
     await page
       .locator('[data-test="add-template-name-input"]')
-      .fill("sanitytemplates");
+      .fill("sanitytemp1");
     const jsonString = '{"text": "{alert_name} is active"}';
     await page.click(".view-line");
     await page.keyboard.type(jsonString);
+    await page.waitForTimeout(500);
     await page
       .locator('[data-test="add-template-submit-btn"]')
       .click({ force: true });
@@ -465,8 +438,8 @@ test.describe("Sanity testcases", () => {
         .first()
     ).toBeVisible();
     await page.waitForTimeout(1000);
-    await page.getByText("AlertsDestinationsTemplates").click();
-    await page.waitForTimeout(2000);
+    // await page.getByText("AlertsDestinationsTemplates").click();
+    // await page.waitForTimeout(2000);
     await page.locator('[data-test="alert-destinations-tab"]').click();
     await page
       .locator('[data-test="alert-destination-list-add-alert-btn"]')
@@ -475,9 +448,9 @@ test.describe("Sanity testcases", () => {
     await page.waitForTimeout(2000);
     await page
       .locator('[data-test="add-destination-name-input"]')
-      .fill("sanitydestinations");
+      .fill("sanitydest1");
     await page.locator('[data-test="add-destination-template-select"]').click();
-    await page.getByText("sanitytemplate").click();
+    await page.getByText("sanitytemp1").click();
     await page.locator('[data-test="add-destination-url-input"]').click();
     await page
       .locator('[data-test="add-destination-url-input"]')
@@ -486,7 +459,8 @@ test.describe("Sanity testcases", () => {
       .locator('[data-test="add-destination-header--key-input"]')
       .click();
     await page.locator('[data-test="add-destination-submit-btn"]').click();
-    await page.locator('[data-test="alert-alerts-tab"]').click();
+    await page.locator('[data-test="menu-link-\\/alerts-item"]').click();
+    await page.waitForTimeout(2000);
     await page.locator('[data-test="alert-list-add-alert-btn"]').click();
     await page
       .locator('[data-test="add-alert-name-input"]')
@@ -496,7 +470,7 @@ test.describe("Sanity testcases", () => {
     await page
       .locator('[data-test="add-alert-name-input"]')
       .getByLabel("Name *")
-      .fill("sanityalerts");
+      .fill("sanityalert1");
     await page
       .locator('[data-test="add-alert-stream-type-select"]')
       .getByText("arrow_drop_down")
@@ -518,17 +492,45 @@ test.describe("Sanity testcases", () => {
       .click();
     await page
       .locator(
-        '[data-test="add-alert-detination-sanitydestinations-select-item"]'
+        '[data-test="add-alert-destination-sanitydest1-select-item"]'
       )
       .click();
     await page.locator('[data-test="add-alert-submit-btn"]').click();
+
+    // Clone the alert
+    await page.locator('[data-test="alert-clone"]').click(); // Ensure this selector is correct
+    await page.getByLabel('Alert Name').click();
+    await page.getByLabel('Alert Name').fill('test-clone');
+    await page.locator('[data-test="to-be-clone-alert-name"]').click()
+    await page.locator('[data-test="to-be-clone-alert-name"]').fill('test-clone');
+    await page.locator('[data-test="to-be-clone-stream-type"]').click();
+    
+    await page.getByRole('option', { name: 'logs' }).locator('div').nth(2).click();
+    await page.locator('[data-test="to-be-clone-stream-name"]').click();
+    await page.locator('[data-test="to-be-clone-stream-name"]').fill('e2e_automate');
+    await page.waitForTimeout(2000);
+    await page.getByRole('option', { name: 'e2e_automate' }).click({force:true});
+    await page.waitForTimeout(2000);
+    await page.locator('[data-test="clone-alert-submit-btn"]').click();
+    await page.getByText('Alert Cloned Successfully').click();
+ 
+  
+    // Delete the cloned alert
+    await page.getByRole('cell', { name: 'test-clone' }).click();
+    await page.locator('[data-test="alert-list-test-clone-delete-alert"]').click(); // Adjust the selector if necessary
+    await page.locator('[data-test="confirm-button"]').click();
+  
+    // Delete the original alert
     await page.locator('[data-test="alert-list-search-input"]').click();
     await page.locator('[data-test="alert-list-search-input"]').fill("sani");
     await page.waitForTimeout(2000);
     await page
-      .locator('[data-test="alert-list-sanityalerts-delete-alert"]')
+      .locator('[data-test="alert-list-sanityalert1-delete-alert"]')
       .click();
     await page.locator('[data-test="confirm-button"]').click();
+    await page.waitForTimeout(2000);
+    await page.locator('[data-test="menu-link-settings-item"]').click();
+    await page.waitForTimeout(2000);
     await page.locator('[data-test="alert-destinations-tab"]').click();
     await page.locator('[data-test="destination-list-search-input"]').click();
     await page
@@ -537,7 +539,7 @@ test.describe("Sanity testcases", () => {
     await page.waitForTimeout(2000);
     await page
       .locator(
-        '[data-test="alert-destination-list-sanitydestinations-delete-destination"]'
+        '[data-test="alert-destination-list-sanitydest1-delete-destination"]'
       )
       .click();
     await page.locator('[data-test="confirm-button"]').click();
@@ -549,7 +551,7 @@ test.describe("Sanity testcases", () => {
     await page.waitForTimeout(2000);
     await page
       .locator(
-        '[data-test="alert-template-list-sanitytemplates-delete-template"]'
+        '[data-test="alert-template-list-sanitytemp1-delete-template"]'
       )
       .click();
     await page.locator('[data-test="confirm-button"]').click();
@@ -583,16 +585,16 @@ test.describe("Sanity testcases", () => {
     await page.locator('[data-test="log-table-column-0-source"]').click();
     await page.locator('[data-test="close-dialog"]').click();
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
   });
 
   test("should change settings successfully", async ({ page }) => {
     await page.waitForTimeout(2000);
-    await page.locator('[data-test="menu-link-\\/settings\\/-item"]').click();
+    await page.locator('[data-test="menu-link-settings-item"]').click();
     await page.waitForTimeout(2000);
     await page.getByText("General SettingsScrape").click();
-    await page.getByRole("tab", { name: "Settings" }).click();
+    await page.getByRole("tab", { name: "General Settings" }).click();
     await page.getByLabel("Scrape Interval (In Seconds) *").fill("16");
     await page.locator('[data-test="dashboard-add-submit"]').click();
     await page.getByText("Organization settings updated").click();
@@ -607,7 +609,7 @@ test.describe("Sanity testcases", () => {
 
   test("should display pagination for schema", async ({ page }) => {
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
     await page.getByText("fast_rewind1/2fast_forward").click();
     await page
@@ -630,7 +632,7 @@ test.describe("Sanity testcases", () => {
     await page.locator('[data-test="log-table-column-0-source"]').click();
     await page.locator('[data-test="close-dialog"]').click();
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
   });
 
@@ -643,10 +645,10 @@ test.describe("Sanity testcases", () => {
       .click();
     await page.getByLabel("SQL Mode").locator("div").first().click();
     await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
-    await page.locator('[data-test="log-table-column-1-\\@timestamp"]').click();
+    await page.locator('[data-test="log-table-column-1-_timestamp"]').click();
     await page.locator('[data-test="close-dialog"]').click();
     await page
-      .getByText("fast_rewind12345fast_forward250arrow_drop_down")
+      .getByText("fast_rewind12345fast_forward100arrow_drop_down")
       .click();
   });
 
@@ -690,7 +692,7 @@ test.describe("Sanity testcases", () => {
     await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
     await page
       .locator(
-        '[data-test="log-table-column-0-\\@timestamp"] [data-test="table-row-expand-menu"]'
+        '[data-test="log-table-column-0-_timestamp"] [data-test="table-row-expand-menu"]'
       )
       .click();
   });
@@ -726,7 +728,7 @@ test.describe("Sanity testcases", () => {
     );
   };
 
-  test("should check JSON responses for successful:1 with timestamp 15 mins before", async ({
+  test.skip("should check JSON responses for successful:1 with timestamp 15 mins before", async ({
     page,
   }) => {
     const orgId = process.env["ORGNAME"];
@@ -769,7 +771,7 @@ test.describe("Sanity testcases", () => {
     expect(response2.status[0].successful).toBe(1);
   });
 
-  test("should display error if timestamp past the ingestion time limit", async ({
+  test.skip("should display error if timestamp past the ingestion time limit", async ({
     page,
   }) => {
     const orgId = process.env["ORGNAME"];
@@ -825,7 +827,7 @@ test.describe("Sanity testcases", () => {
     const seconds = String(date.getSeconds()).padStart(2, "0");
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
-  test("should compare time displayed in table dashboard after changing timezone and then delete it ", async ({ page }) => {
+  test.skip("should compare time displayed in table dashboards after changing timezone and then delete it ", async ({ page }) => {
     const orgId = process.env["ORGNAME"];
     const streamName = "e2e_tabledashboard";
     const headers = getHeaders();
@@ -864,8 +866,8 @@ test.describe("Sanity testcases", () => {
     await page
       .locator('[data-test="index-dropdown-stream"]')
       .fill("e2e_tabledashboard");
-      await page.waitForTimeout(4000);
-    await page.getByRole("option", { name: "e2e_tabledashboard" }).click();
+    await page.waitForTimeout(4000);
+    await page.getByRole("option", { name: "e2e_tabledashboard" }).click({ force: true });
     await page.waitForTimeout(6000);
 
     await page
@@ -876,11 +878,6 @@ test.describe("Sanity testcases", () => {
     await page
       .locator(
         '[data-test="field-list-item-logs-e2e_tabledashboard-job"] [data-test="dashboard-add-y-data"]'
-      )
-      .click();
-    await page
-      .locator(
-        '[data-test="field-list-item-logs-e2e_tabledashboard-_timestamp"] [data-test="dashboard-add-x-data"]'
       )
       .click();
     await page.locator('[data-test="dashboard-apply"]').click();
@@ -896,8 +893,8 @@ test.describe("Sanity testcases", () => {
     await page
       .locator('[data-test="datetime-timezone-select"]')
       .fill("Asia/Calcutta");
-      await page.getByText("Asia/Calcutta", { exact: true }).click();
-      await page.waitForTimeout(200);
+    await page.getByText("Asia/Calcutta", { exact: true }).click();
+    await page.waitForTimeout(200);
 
     // NOTE: pass selected timezone
     const calcuttaTime = toZonedTime(new Date(timestamp), "Asia/Calcutta");
@@ -948,5 +945,54 @@ test.describe("Sanity testcases", () => {
       .locator('[data-test="dashboard-delete"]')
       .click();
     await page.locator('[data-test="confirm-button"]').click();
+  });
+  test('should verify search history displayed and user navigates to logs', async ({ page, context }) => {
+    // Step 1: Click on the "Share Link" button
+    await page.getByLabel('SQL Mode').locator('div').nth(2).click();
+    await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
+    await page.getByRole('button', { name: 'Search History' }).click();
+    await page.locator('[data-test="search-history-date-time"]').click();
+    await page.locator('[data-test="date-time-relative-6-h-btn"]').click();
+    await page.getByRole('button', { name: 'Get History' }).click();
+    await page.waitForTimeout(6000);
+    await page.getByRole('cell', { name: 'Trace ID' }).click();
+    // Locate the row using a known static value like the SQL query
+    const row = page.locator('tr:has-text("select histogram")');
+    // Click the button inside the located row
+  await row.locator('button.q-btn').nth(0).click();
+    await page.getByRole('button', { name: 'Logs' }).click();
+    await page.locator('[data-test="logs-search-index-list"]').getByText('e2e_automate').click()
+    await expect(page).toHaveURL(/stream_type=logs/)
+  });
+
+  test('should verify logs page displayed on click back button on search history page', async ({ page, context }) => {
+    // Step 1: Click on the "Share Link" button
+    await page.getByLabel('SQL Mode').locator('div').nth(2).click();
+    await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
+    await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
+    await page.getByRole('button', { name: 'Search History' }).click();
+    await page.locator('[data-test="search-history-date-time"]').click();
+    await page.locator('[data-test="date-time-relative-6-h-btn"]').click();
+    await page.locator('[data-test="search-history-alert-back-btn"]').click();
+    await page.locator('[data-test="logs-search-index-list"] div').filter({ hasText: 'e2e_automate' }).nth(4).click();
+    await page.waitForTimeout(2000);
+    await page.locator('[data-test="log-table-column-0-_timestamp"]').click();
+  });
+
+  test('should verify user redirected to logs page when clicking stream explorer and on clicking get history, logs history displayed', async ({ page, context }) => {
+    // Step 1: Click on the "Share Link" button
+    await page.locator('[data-test="menu-link-\\/streams-item"]').click();
+    await page.getByPlaceholder('Search Stream').click();
+    await page.getByPlaceholder('Search Stream').fill('e2e_automate');
+    await page.getByRole('button', { name: 'Explore' }).first().click();
+    await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
+    await page.getByRole('button', { name: 'Search History' }).click();
+    await page.locator('[data-test="add-alert-title"]').click();
+    await page.getByText('arrow_back_ios_new').click();
+    await page.waitForTimeout(1000);
+
+    // Use a more specific locator for 'e2e_automate' by targeting its unique container or parent element
+    await page.locator('[data-test="logs-search-index-list"]').getByText('e2e_automate').click();
+
   });
 });

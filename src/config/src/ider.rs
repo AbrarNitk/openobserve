@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -191,7 +191,7 @@ impl SnowflakeIdBucket {
 pub fn get_time_millis(epoch: SystemTime) -> i64 {
     SystemTime::now()
         .duration_since(epoch)
-        .expect("Time went mackward")
+        .expect("Time went backward")
         .as_millis() as i64
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,22 +13,40 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[cfg(feature = "enterprise")]
-use {
-    crate::common::{infra::config::USERS, meta::organization::DEFAULT_ORG, meta::user::UserRole},
-    crate::service::db,
-    hashbrown::HashSet,
-    infra::dist_lock,
-    o2_enterprise::enterprise::openfga::{
-        authorizer::authz::{get_org_creation_tuples, get_user_role_tuple, update_tuples},
+use std::cmp::Ordering;
+
+use hashbrown::HashSet;
+use infra::dist_lock;
+use o2_enterprise::enterprise::{
+    common::infra::config::get_config as get_o2_config,
+    openfga::{
+        authorizer::authz::{
+            add_tuple_for_pipeline, get_index_creation_tuples, get_org_creation_tuples,
+            get_ownership_all_org_tuple, get_user_role_tuple, update_tuples,
+        },
         meta::mapping::{NON_OWNING_ORG, OFGA_MODELS},
     },
+    super_cluster::kv::ofga::{get_model, set_model},
 };
 
-#[cfg(feature = "enterprise")]
-pub async fn init() {
+use crate::{
+    common::{
+        infra::config::USERS,
+        meta::{organization::DEFAULT_ORG, user::UserRole},
+    },
+    service::db,
+};
+
+pub async fn init() -> Result<(), anyhow::Error> {
+    use o2_enterprise::enterprise::openfga::{
+        authorizer::authz::get_tuple_for_new_index, get_all_init_tuples,
+    };
+
+    let mut init_tuples = vec![];
     let mut migrate_native_objects = false;
-    let existing_meta = match db::ofga::get_ofga_model().await {
+    let mut need_migrate_index_streams = false;
+    let mut need_pipeline_migration = false;
+    let mut existing_meta = match db::ofga::get_ofga_model().await {
         Ok(Some(model)) => Some(model),
         Ok(None) | Err(_) => {
             migrate_native_objects = true;
@@ -36,11 +54,70 @@ pub async fn init() {
         }
     };
 
+    // sync with super cluster
+    if get_o2_config().super_cluster.enabled {
+        let meta_in_super = get_model().await?;
+        match (meta_in_super, &existing_meta) {
+            (None, Some(existing_model)) => {
+                // set to super cluster
+                set_model(Some(existing_model.clone())).await?;
+            }
+            (Some(model), None) => {
+                // set to local
+                existing_meta = Some(model.clone());
+                migrate_native_objects = false;
+                db::ofga::set_ofga_model_to_db(model).await?;
+            }
+            (Some(model), Some(existing_model)) => match model.version.cmp(&existing_model.version)
+            {
+                Ordering::Less => {
+                    // update version in super cluster
+                    set_model(Some(existing_model.clone())).await?;
+                }
+                Ordering::Greater => {
+                    // update version in local
+                    existing_meta = Some(model.clone());
+                    migrate_native_objects = false;
+                    db::ofga::set_ofga_model_to_db(model).await?;
+                }
+                Ordering::Equal => {}
+            },
+            _ => {}
+        }
+    }
+
     let meta = o2_enterprise::enterprise::openfga::model::read_ofga_model().await;
+    get_all_init_tuples(&mut init_tuples).await;
     if let Some(existing_model) = &existing_meta {
         if meta.version == existing_model.version {
             log::info!("OFGA model already exists & no changes required");
-            return;
+            if !init_tuples.is_empty() {
+                match update_tuples(init_tuples, vec![]).await {
+                    Ok(_) => {
+                        log::info!("Data migrated to openfga");
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Error writing init ofga tuples to the openfga during migration: {}",
+                            e
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // Check if ofga migration of index streams are needed
+        let meta_version = version_compare::Version::from(&meta.version).unwrap();
+        let existing_model_version =
+            version_compare::Version::from(&existing_model.version).unwrap();
+        let v0_0_4 = version_compare::Version::from("0.0.4").unwrap();
+        let v0_0_5 = version_compare::Version::from("0.0.5").unwrap();
+        let v0_0_6 = version_compare::Version::from("0.0.6").unwrap();
+        if meta_version > v0_0_4 && existing_model_version < v0_0_5 {
+            need_migrate_index_streams = true;
+        }
+        if meta_version > v0_0_5 && existing_model_version < v0_0_6 {
+            need_pipeline_migration = true;
         }
     }
 
@@ -56,18 +133,25 @@ pub async fn init() {
             o2_enterprise::enterprise::common::infra::config::OFGA_STORE_ID
                 .insert("store_id".to_owned(), store_id);
 
-            if migrate_native_objects {
-                let mut tuples = vec![];
-                let r = infra::schema::STREAM_SCHEMAS.read().await;
-                let mut orgs = HashSet::new();
-                for key in r.keys() {
-                    if !key.contains('/') {
-                        continue;
-                    }
-                    let org_name = key.split('/').collect::<Vec<&str>>()[0];
-                    orgs.insert(org_name);
+            let mut tuples = vec![];
+            let r = infra::schema::STREAM_SCHEMAS.read().await;
+            let mut orgs = HashSet::new();
+            for key in r.keys() {
+                if !key.contains('/') {
+                    continue;
                 }
-
+                let split_key = key.split('/').collect::<Vec<&str>>();
+                let org_name = split_key[0];
+                orgs.insert(org_name);
+                if need_migrate_index_streams
+                    && split_key.len() > 2
+                    && split_key[1] == "index"
+                    && !migrate_native_objects
+                {
+                    get_tuple_for_new_index(org_name, split_key[2], &mut tuples);
+                }
+            }
+            if migrate_native_objects {
                 for org_name in orgs {
                     get_org_creation_tuples(
                         org_name,
@@ -109,24 +193,53 @@ pub async fn init() {
                         get_user_role_tuple(&role, &user.email, &user.org, &mut tuples);
                     }
                 }
-
-                if tuples.is_empty() {
-                    log::info!("No orgs to update to the openfga");
-                } else {
-                    match update_tuples(tuples, vec![]).await {
-                        Ok(_) => {
-                            log::info!("Data migrated to openfga");
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "Error updating orgs & users to the openfga during migration: {}",
-                                e
-                            );
+            } else {
+                for org_name in orgs {
+                    if need_migrate_index_streams {
+                        get_index_creation_tuples(org_name, &mut tuples).await;
+                    }
+                    if need_pipeline_migration {
+                        get_ownership_all_org_tuple(org_name, "pipelines", &mut tuples);
+                        match db::pipeline::list_by_org(org_name).await {
+                            Ok(pipelines) => {
+                                for pipeline in pipelines {
+                                    add_tuple_for_pipeline(org_name, &pipeline.id, &mut tuples);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to migrate RBAC for org {} pipelines: {}",
+                                    org_name,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
-                drop(r);
             }
+
+            // Check if there are init ofga tuples that needs to be added now
+            for tuple in init_tuples {
+                tuples.push(tuple);
+            }
+
+            if tuples.is_empty() {
+                log::info!("No orgs to update to the openfga");
+            } else {
+                log::debug!("tuples not empty: {:#?}", tuples);
+                match update_tuples(tuples, vec![]).await {
+                    Ok(_) => {
+                        log::info!("Data migrated to openfga");
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Error updating orgs & users to the openfga during migration: {}",
+                            e
+                        );
+                    }
+                }
+            }
+            drop(r);
         }
         Err(e) => {
             log::error!("Error setting OFGA model: {:?}", e);
@@ -136,4 +249,6 @@ pub async fn init() {
     dist_lock::unlock(&locker)
         .await
         .expect("Failed to release lock");
+
+    Ok(())
 }

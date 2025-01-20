@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,18 +14,24 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod arrow;
-pub mod asynchronism;
+pub mod async_file;
 pub mod base64;
 pub mod cgroup;
+pub mod download_utils;
 pub mod file;
 pub mod flatten;
 pub mod hash;
 pub mod inverted_index;
 pub mod json;
+pub mod md5;
 pub mod parquet;
+pub mod prom_json_encoder;
 pub mod rand;
 pub mod record_batch_ext;
 pub mod schema;
 pub mod schema_ext;
+pub mod sql;
 pub mod str;
+pub mod tantivy;
 pub mod time;
+pub mod util;

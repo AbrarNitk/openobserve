@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,9 +21,12 @@ import { useQuasar } from "quasar";
 import { useStore } from "vuex";
 import useStreams from "@/composables/useStreams";
 import userService from "@/services/users";
+import { DateTime as _DateTime } from "luxon";
+import store from "../stores";
 
 let moment: any;
 let momentInitialized = false;
+const organizationDataLocal: any = ref({});
 
 const importMoment = async () => {
   if (!momentInitialized) {
@@ -38,12 +41,13 @@ const useLocalStorage = (
   key: string,
   defaultValue: unknown,
   isDelete: boolean = false,
-  isJSONValue: boolean = false
+  isJSONValue: boolean = false,
 ) => {
   try {
     const value = ref(defaultValue);
     const read = () => {
       const v = window.localStorage.getItem(key);
+
       if (v != null && isJSONValue === true) value.value = JSON.parse(v);
       else if (v != null) value.value = v;
       else value.value = null;
@@ -78,10 +82,10 @@ const useLocalStorage = (
     if (
       window.localStorage.getItem(key) == null &&
       !isDelete &&
-      defaultValue != ""
+      defaultValue !== ""
     )
       write();
-    else if (value.value != defaultValue && defaultValue != "") write();
+    else if (value.value !== defaultValue && defaultValue !== "") write();
 
     const remove = () => {
       window.localStorage.removeItem(key);
@@ -94,7 +98,7 @@ const useLocalStorage = (
     return value;
   } catch (e) {
     console.log(
-      `Error: Error in UseLocalStorage for key: ${key}, error-message : ${e}`
+      `Error: Error in UseLocalStorage for key: ${key}, error-message : ${e}`,
     );
   }
 };
@@ -117,7 +121,7 @@ export const getUserInfo = (loginString: string) => {
             payload["family_name"] = payload["name"];
             payload["given_name"] = "";
             const encodedSessionData: any = b64EncodeStandard(
-              JSON.stringify(payload)
+              JSON.stringify(payload),
             );
             useLocalUserInfo(encodedSessionData);
             decToken = payload;
@@ -129,7 +133,7 @@ export const getUserInfo = (loginString: string) => {
         } else {
           decToken = getDecodedAccessToken(propArr[1]);
           const encodedSessionData: any = b64EncodeStandard(
-            JSON.stringify(decToken)
+            JSON.stringify(decToken),
           );
           useLocalUserInfo(encodedSessionData);
         }
@@ -177,7 +181,7 @@ export const b64EncodeUnicode = (str: string) => {
     return btoa(
       encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
         return String.fromCharCode(parseInt(`0x${p1}`));
-      })
+      }),
     )
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
@@ -197,9 +201,9 @@ export const b64DecodeUnicode = (str: string) => {
           atob(str.replace(/\-/g, "+").replace(/\_/g, "/").replace(/\./g, "=")),
           function (c) {
             return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
-          }
+          },
         )
-        .join("")
+        .join(""),
     );
   } catch (e) {
     console.log("Error: getBase64Decode: error while decoding.");
@@ -213,8 +217,8 @@ export const b64EncodeStandard = (str: string) => {
         /%([0-9A-F]{2})/g,
         function (match, p1: any) {
           return String.fromCharCode(parseInt(`0x${p1}`));
-        }
-      )
+        },
+      ),
     );
   } catch (e) {
     console.log("Error: getBase64Encode: error while encoding.");
@@ -228,7 +232,7 @@ export const b64DecodeStandard = (str: string) => {
         .call(atob(str), function (c) {
           return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
         })
-        .join("")
+        .join(""),
     );
   } catch (e) {
     console.log("Error: getBase64Decode: error while decoding.");
@@ -243,8 +247,22 @@ export const getSessionStorageVal = (key: string) => {
   }
 };
 
-export const useLocalOrganization = (val: any = "", isDelete = false) => {
-  return useLocalStorage("organization", val, isDelete, true);
+export const useLocalOrganization = (val: any = {}, isDelete = false) => {
+  try {
+    if (typeof val === "object") {
+      if (Object.keys(val).length > 0) {
+        organizationDataLocal.value = val;
+      } else if (isDelete) {
+        organizationDataLocal.value = {};
+      }
+      return organizationDataLocal;
+    } else {
+      return organizationDataLocal;
+    }
+  } catch (e) {
+    console.log(`Error: Error in useLocalOrganization: ${e}`);
+    return ref({});
+  }
 };
 
 export const useLocalCurrentUser = (val = "", isDelete = false) => {
@@ -282,7 +300,7 @@ export const useLocalTimezone = (val = "", isDelete = false) => {
 };
 
 export const useLocalWrapContent = (val = "", isDelete = false) => {
-  const wrapcontent: any = useLocalStorage("wrapcontent", val, isDelete);
+  const wrapcontent: any = useLocalStorage("wrapContent", val, isDelete);
   return wrapcontent.value;
 };
 
@@ -362,8 +380,8 @@ export const getPath = () => {
     window.location.origin == "http://localhost:8081"
       ? "/"
       : pos > -1
-      ? window.location.pathname.slice(0, pos + 5)
-      : "";
+        ? window.location.pathname.slice(0, pos + 5)
+        : "";
   const cloudPath = import.meta.env.BASE_URL;
   return config.isCloud == "true" ? cloudPath : path;
 };
@@ -487,6 +505,11 @@ export const formatSizeFromMB = (sizeInMB: string) => {
   return `${size.toFixed(2)} ${units[index]}`;
 };
 
+export const addCommasToNumber = (number: number) => {
+  if (number === null || number === undefined) return '0';
+  return number.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+};
+
 /**
  * @param us : Time in microseconds
  */
@@ -508,14 +531,14 @@ export const mergeRoutes: any = (route1: any, route2: any) => {
   // Iterate through route1 and add its elements to mergedRoutes
   for (const r1 of route1) {
     const matchingRoute = route2.find(
-      (r2: any) => r2.path === r1.path && r2.name === r1.name
+      (r2: any) => r2.path === r1.path && r2.name === r1.name,
     );
 
     if (matchingRoute) {
       // If a matching route is found in route2, merge the children
       const mergedChildren = mergeRoutes(
         r1.children || [],
-        matchingRoute.children || []
+        matchingRoute.children || [],
       );
       mergedRoutes.push({
         ...r1,
@@ -557,7 +580,7 @@ export function formatDuration(ms: number) {
 export const timestampToTimezoneDate = (
   unixMilliTimestamp: number,
   timezone: string = "UTC",
-  format: string = "yyyy-MM-dd HH:mm:ss.SSS"
+  format: string = "yyyy-MM-dd HH:mm:ss.SSS",
 ) => {
   return DateTime.fromMillis(Math.floor(unixMilliTimestamp))
     .setZone(timezone)
@@ -566,13 +589,15 @@ export const timestampToTimezoneDate = (
 
 export const histogramDateTimezone: any = (
   utcTime: any,
-  timezone: string = "UTC"
+  timezone: string = "UTC",
 ) => {
   if (timezone == "UTC") return Math.floor(new Date(utcTime).getTime());
   else {
     return (
       Math.floor(
-        DateTime.fromISO(utcTime, { zone: "UTC" }).setZone(timezone).toSeconds()
+        DateTime.fromISO(utcTime, { zone: "UTC" })
+          .setZone(timezone)
+          .toSeconds(),
       ) * 1000
     );
   }
@@ -583,7 +608,7 @@ export const histogramDateTimezone: any = (
 // const inputTimezone = "Pacific/Pitcairn";
 export const convertToUtcTimestamp = (
   inputDatetime: string,
-  inputTimezone: string
+  inputTimezone: string,
 ) => {
   // Create a DateTime object with the input datetime and timezone
   const dt = DateTime.fromFormat(inputDatetime, "yyyy/MM/dd HH:mm:ss", {
@@ -598,7 +623,7 @@ export const convertToUtcTimestamp = (
 
 export const localTimeSelectedTimezoneUTCTime = async (
   time: any,
-  timezone: string
+  timezone: string,
 ) => {
   await importMoment();
   // Creating a Date object using the timestamp
@@ -615,7 +640,7 @@ export const localTimeSelectedTimezoneUTCTime = async (
   // Create a moment object using the provided date, time, and timezone
   const convertedDate = moment.tz(
     { year, month, day, hour, minute, second },
-    timezone
+    timezone,
   );
 
   // Convert the moment object to a Unix timestamp (in seconds)
@@ -692,10 +717,10 @@ export const queryIndexSplit = (query: string, splitWord: string) => {
 
   // Return the two parts as an array
   return [beforeSplit, afterSplit];
-}
+};
 export const convertToCamelCase = (str: string) => {
   if (!str) {
-    return ''; // or handle the case as needed
+    return ""; // or handle the case as needed
   }
 
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
@@ -706,23 +731,260 @@ export const getFunctionErrorMessage = (
   message: string,
   newStartTime: number,
   newEndTime: number,
-  timezone = "UTC"
+  timezone = "UTC",
 ) => {
   try {
     // Convert timestamps to formatted dates using timestampToTimezoneDate function
     const startTimeFormatted = timestampToTimezoneDate(
       newStartTime / 1000,
       timezone,
-      "yyyy-MM-dd HH:mm:ss"
+      "yyyy-MM-dd HH:mm:ss",
     );
     const endTimeFormatted = timestampToTimezoneDate(
       newEndTime / 1000,
       timezone,
-      "yyyy-MM-dd HH:mm:ss"
+      "yyyy-MM-dd HH:mm:ss",
     );
 
     return `${message} (Data returned for: ${startTimeFormatted} to ${endTimeFormatted})`;
   } catch (error) {
     return message;
+  }
+};
+
+export const generateTraceContext = () => {
+  const traceId = getUUID().replace(/-/g, "");
+  const spanId = getUUID().replace(/-/g, "").slice(0, 16);
+
+  return {
+    traceparent: `00-${traceId}-${spanId}-01`,
+    traceId,
+    spanId,
+  };
+};
+
+/**
+ * Formats the duration in seconds into a human-readable string representation.
+ * The format of the output string is:
+ * - For durations less than 60 seconds, returns the duration in seconds.
+ * - For durations less than 3600 seconds (1 hour), returns minutes and seconds.
+ * - For durations less than 86400 seconds (1 day), returns hours, minutes, and seconds.
+ * - For durations equal to or greater than 1 day, returns days, hours, minutes, and seconds.
+ * - If no value(0) than removes the duration from the string.
+ *
+ * @param {number} durationInSeconds - The duration in seconds to be formatted.
+ * @return {string} The formatted duration string.
+ */
+export const durationFormatter = (durationInSeconds: number): string => {
+  let formattedDuration;
+
+  // If duration is invalid, set formatted duration to "Invalid duration"
+  // For example, if the duration is -1 seconds, the output string will be "Invalid duration".
+  if (durationInSeconds < 0) {
+    formattedDuration = "Invalid duration";
+  } else if (durationInSeconds < 60) {
+    // If duration is less than 60 seconds, return duration in seconds
+    // For example, if the duration is 30 seconds, the output string will be "30s".
+    formattedDuration = `${durationInSeconds}s`;
+  } else if (durationInSeconds < 3600) {
+    // If duration is less than 1 hour, calculate minutes and seconds and return
+    // For example, if the duration is 150 seconds, the output string will be "2m 30s".
+    const minutes = Math.floor(durationInSeconds / 60);
+    const seconds = durationInSeconds % 60;
+    formattedDuration = `${minutes > 0 ? `${minutes}m ` : ""}${
+      seconds > 0 ? `${seconds}s` : ""
+    }`.trim();
+  } else if (durationInSeconds < 86400) {
+    // If duration is less than 1 day, calculate hours, minutes, and seconds and return
+    // For example, if the duration is 7200 seconds, the output string will be "2h".
+    const hours = Math.floor(durationInSeconds / 3600);
+    const minutes = Math.floor((durationInSeconds % 3600) / 60);
+    const seconds = durationInSeconds % 60;
+    formattedDuration = `${hours > 0 ? `${hours}h ` : ""}${
+      minutes > 0 ? `${minutes}m ` : ""
+    }${seconds > 0 ? `${seconds}s` : ""}`.trim();
+  } else {
+    // If duration is equal to or greater than 1 day, calculate days, hours, minutes, and seconds and return
+    // For example, if the durartion is 86900 seconds, the output string will be "1d 8m 20s".
+    const days = Math.floor(durationInSeconds / 86400);
+    const hours = Math.floor((durationInSeconds % 86400) / 3600);
+    const minutes = Math.floor((durationInSeconds % 3600) / 60);
+    const seconds = durationInSeconds % 60;
+    formattedDuration = `${days > 0 ? `${days}d ` : ""}${
+      hours > 0 ? `${hours}h ` : ""
+    }${minutes > 0 ? `${minutes}m ` : ""}${
+      seconds > 0 ? `${seconds}s` : ""
+    }`.trim();
+  }
+
+  return formattedDuration;
+};
+
+export const getTimezoneOffset = () => {
+  const now = new Date();
+
+  // Get the day, month, and year from the date object
+  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0"); // January is 0!
+  const year = now.getFullYear();
+
+  // Combine them in the DD-MM-YYYY format
+  const scheduleDate = `${day}-${month}-${year}`;
+
+  // Get the hours and minutes, ensuring they are formatted with two digits
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+
+  // Combine them in the HH:MM format
+  const scheduleTime = `${hours}:${minutes}`;
+
+  const ScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const convertedDateTime = convertDateToTimestamp(
+    scheduleDate,
+    scheduleTime,
+    ScheduleTimezone,
+  );
+
+  return convertedDateTime.offset;
+};
+
+export const convertDateToTimestamp = (
+  date: string,
+  time: string,
+  timezone: string,
+) => {
+  const browserTime =
+    "Browser Time (" + Intl.DateTimeFormat().resolvedOptions().timeZone + ")";
+
+  const [day, month, year] = date.split("-");
+  const [hour, minute] = time.split(":");
+
+  const _date = {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: Number(hour),
+    minute: Number(minute),
+  };
+
+  if (timezone.toLowerCase() == browserTime.toLowerCase()) {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  }
+
+  // Create a DateTime instance from date and time, then set the timezone
+  const dateTime = _DateTime.fromObject(_date, { zone: timezone });
+
+  // Convert the DateTime to a Unix timestamp in milliseconds
+  const unixTimestampMillis = dateTime.toMillis();
+
+  return { timestamp: unixTimestampMillis * 1000, offset: dateTime.offset }; // timestamp in microseconds
+};
+
+export const isValidResourceName = (name: string) => {
+  const roleNameRegex = /^[^:#?&%'"\s]+$/;
+  // Check if the role name is valid
+  return roleNameRegex.test(name);
+};
+
+export const escapeSingleQuotes = (value: any) => {
+  return value?.replace(/'/g, "''");
+};
+
+/**
+ * Splits a string into an array of elements, allowing quoted strings to
+ * contain commas.
+ *
+ * @param {string} input - The input string to split
+ * @returns {array} An array of elements, or the original input if it is null
+ * or empty
+ */
+export const splitQuotedString = (input: any) => {
+  // Check if the input is null or empty
+  if (input == null) {
+    return input;
+  }
+
+  // Trim the input to remove any leading/trailing whitespace
+  input = input.trim();
+
+  // Regular expression to match elements which can be:
+  // - Enclosed in single or double quotes (allowing commas inside)
+  // - Not enclosed in any quotes
+  const regex = /'([^']*?)'|"([^"]*?)"|([^,()]+)/g;
+
+  // Result array to store the parsed elements
+  const result = [];
+
+  // Match all elements according to the pattern
+  let match;
+  while ((match = regex.exec(input)) !== null) {
+    // Use the first non-null captured group
+    const value = match[1] || match[2] || match[3];
+
+    // Trim whitespace around the element (though quotes should handle this)
+    const trimmedValue = value.trim();
+
+    // Push non-empty values to the result array
+    if (trimmedValue) {
+      result.push(trimmedValue);
+    }
+  }
+
+  return result;
+};
+
+export const getTimezonesByOffset = async (offsetMinutes: number) => {
+  await importMoment();
+  const offsetHours = offsetMinutes / 60;
+  const timezones = moment.tz.names();
+  return timezones.filter((zone: string) => {
+    const zoneOffset = moment.tz(zone).utcOffset() / 60;
+    return zoneOffset === offsetHours;
+  });
+};
+
+export const convertTimeFromNsToMs = (time: number) => {
+  const nanoseconds = time;
+  const milliseconds = Math.floor(nanoseconds / 1000000);
+  const date = new Date(milliseconds);
+  return date.getTime();
+};
+
+export const arraysMatch = (arr1: Array<any>, arr2: Array<any>) => {
+  // Check if arrays have the same length
+  if (arr1.length !== arr2.length) return false;
+
+  // Sort both arrays
+  arr1 = arr1.slice().sort();
+  arr2 = arr2.slice().sort();
+
+  // Compare each element in the sorted arrays
+  for (let i = 0; i < arr1.length; i++) {
+    if (arr1[i] !== arr2[i]) return false;
+  }
+
+  return true;
+};
+
+export const deepCopy = (value: any) => {
+  return JSON.parse(JSON.stringify(value));
+};
+
+export const getWebSocketUrl = (request_id: string, org_identifier: string) => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${store.state.API_ENDPOINT.split("//")[1]}/api/${org_identifier}/ws/${request_id}`;
+};
+
+export const isWebSocketEnabled = () => {
+  if (!store.state.zoConfig?.websocket_enabled) {
+    return false;
+  }
+
+  if ((window as any).use_web_socket === undefined) {
+    return store?.state?.organizationData?.organizationSettings
+      ?.enable_websocket_search;
+  } else {
+    return (window as any).use_web_socket;
   }
 };

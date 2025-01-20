@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -19,8 +19,9 @@ use actix_web::{
     http::{header, Method},
     web, Error,
 };
-use actix_web_httpauth::extractors::basic::BasicAuth;
 use config::{get_config, utils::base64};
+#[cfg(feature = "enterprise")]
+use o2_enterprise::enterprise::common::infra::config::get_config as get_o2_config;
 
 use crate::{
     common::{
@@ -31,7 +32,10 @@ use crate::{
                 UserRole,
             },
         },
-        utils::auth::{get_hash, is_root_user, AuthExtractor},
+        utils::{
+            auth::{get_hash, is_root_user, AuthExtractor},
+            redirect_response::RedirectResponseBuilder,
+        },
     },
     service::{db, users},
 };
@@ -80,7 +84,13 @@ pub async fn validator(
                 );
 
                 if auth_info.bypass_check
-                    || check_permissions(user_id, auth_info, res.user_role).await
+                    || check_permissions(
+                        user_id,
+                        auth_info,
+                        res.user_role.unwrap_or_default(),
+                        !res.is_internal_user,
+                    )
+                    .await
                 {
                     Ok(req)
                 } else {
@@ -169,6 +179,53 @@ pub async fn validate_credentials(
         });
     }
     let user = user.unwrap();
+
+    #[cfg(feature = "enterprise")]
+    {
+        if !o2_enterprise::enterprise::common::infra::config::get_config()
+            .dex
+            .native_login_enabled
+            && !user.is_external
+        {
+            return Ok(TokenValidationResponse {
+                is_valid: false,
+                user_email: "".to_string(),
+                is_internal_user: false,
+                user_role: None,
+                user_name: "".to_string(),
+                family_name: "".to_string(),
+                given_name: "".to_string(),
+            });
+        }
+
+        if o2_enterprise::enterprise::common::infra::config::get_config()
+            .dex
+            .root_only_login
+            && !is_root_user(user_id)
+        {
+            return Ok(TokenValidationResponse {
+                is_valid: false,
+                user_email: "".to_string(),
+                is_internal_user: false,
+                user_role: None,
+                user_name: "".to_string(),
+                family_name: "".to_string(),
+                given_name: "".to_string(),
+            });
+        }
+    }
+
+    if user.role.eq(&UserRole::ServiceAccount) && user.token.eq(&user_password) {
+        return Ok(TokenValidationResponse {
+            is_valid: true,
+            user_email: user.email,
+            is_internal_user: !user.is_external,
+            user_role: Some(user.role),
+            user_name: user.first_name.to_owned(),
+            family_name: user.last_name,
+            given_name: user.first_name,
+        });
+    }
 
     if (path_columns.len() == 1 || INGESTION_EP.iter().any(|s| path_columns.contains(s)))
         && user.token.eq(&user_password)
@@ -336,6 +393,7 @@ async fn validate_user_from_db(
         Ok(mut user) => {
             let in_pass = get_hash(user_password, &user.salt);
             if req_time.is_none() && user.password.eq(&in_pass) {
+                log::debug!("Validating internal user");
                 if user.password_ext.is_none() {
                     let password_ext = get_hash(user_password, password_ext_salt);
                     user.password_ext = Some(password_ext);
@@ -403,7 +461,7 @@ pub async fn validate_user_for_query_params(
 
 pub async fn validator_aws(
     req: ServiceRequest,
-    _credentials: Option<BasicAuth>,
+    _thread_id: web::Data<usize>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let cfg = get_config();
     let path = req
@@ -448,7 +506,7 @@ pub async fn validator_aws(
 
 pub async fn validator_gcp(
     req: ServiceRequest,
-    _credentials: Option<BasicAuth>,
+    _thread_id: web::Data<usize>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let cfg = get_config();
     let path = req
@@ -490,7 +548,7 @@ pub async fn validator_gcp(
 
 pub async fn validator_rum(
     req: ServiceRequest,
-    _credentials: Option<BasicAuth>,
+    _thread_id: web::Data<usize>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let path = req
         .request()
@@ -511,7 +569,6 @@ pub async fn validator_rum(
     let query =
         web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
             .unwrap();
-
     let token = query.get("oo-api-key").or_else(|| query.get("o2-api-key"));
     match token {
         Some(token) => match validate_token(token, org_id_end_point[0]).await {
@@ -540,8 +597,10 @@ async fn oo_validator_internal(
     path_prefix: &str,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     if auth_info.auth.starts_with("Basic") {
-        let decoded = base64::decode(auth_info.auth.strip_prefix("Basic").unwrap().trim())
-            .expect("Failed to decode base64 string");
+        let decoded = match base64::decode(auth_info.auth.strip_prefix("Basic").unwrap().trim()) {
+            Ok(val) => val,
+            Err(_) => return Err((ErrorUnauthorized("Unauthorized Access"), req)),
+        };
 
         let (username, password) = match get_user_details(decoded) {
             Some(value) => value,
@@ -556,14 +615,16 @@ async fn oo_validator_internal(
         if chrono::Utc::now().timestamp() - auth_tokens.request_time > auth_tokens.expires_in {
             Err((ErrorUnauthorized("Unauthorized Access"), req))
         } else {
-            let decoded = base64::decode(
+            let decoded = match base64::decode(
                 auth_tokens
                     .auth_ext
                     .strip_prefix("auth_ext")
                     .unwrap()
                     .trim(),
-            )
-            .expect("Failed to decode base64 string");
+            ) {
+                Ok(val) => val,
+                Err(_) => return Err((ErrorUnauthorized("Unauthorized Access"), req)),
+            };
             let (username, password) = match get_user_details(decoded) {
                 Some(value) => value,
                 None => return Err((ErrorUnauthorized("Unauthorized Access"), req)),
@@ -578,8 +639,10 @@ async fn oo_validator_internal(
 #[cfg(feature = "enterprise")]
 pub async fn get_user_email_from_auth_str(auth_str: &str) -> Option<String> {
     if auth_str.starts_with("Basic") {
-        let decoded = base64::decode(auth_str.strip_prefix("Basic").unwrap().trim())
-            .expect("Failed to decode base64 string");
+        let decoded = match base64::decode(auth_str.strip_prefix("Basic").unwrap().trim()) {
+            Ok(val) => val,
+            Err(_) => return None,
+        };
 
         match get_user_details(decoded) {
             Some(value) => Some(value.0),
@@ -593,14 +656,16 @@ pub async fn get_user_email_from_auth_str(auth_str: &str) -> Option<String> {
         if chrono::Utc::now().timestamp() - auth_tokens.request_time > auth_tokens.expires_in {
             None
         } else {
-            let decoded = base64::decode(
+            let decoded = match base64::decode(
                 auth_tokens
                     .auth_ext
                     .strip_prefix("auth_ext")
                     .unwrap()
                     .trim(),
-            )
-            .expect("Failed to decode base64 string");
+            ) {
+                Ok(val) => val,
+                Err(_) => return None,
+            };
             match get_user_details(decoded) {
                 Some(value) => Some(value.0),
                 None => None,
@@ -612,9 +677,10 @@ pub async fn get_user_email_from_auth_str(auth_str: &str) -> Option<String> {
 }
 
 fn get_user_details(decoded: String) -> Option<(String, String)> {
-    let credentials = String::from_utf8(decoded.into())
-        .map_err(|_| ())
-        .expect("Failed to decode base64 string");
+    let credentials = match String::from_utf8(decoded.into()).map_err(|_| ()) {
+        Ok(val) => val,
+        Err(_) => return None,
+    };
     let parts: Vec<&str> = credentials.splitn(2, ':').collect();
     if parts.len() != 2 {
         return None;
@@ -640,10 +706,34 @@ fn get_user_details(decoded: String) -> Option<(String, String)> {
 /// If the authentication is invalid, it returns an `ErrorUnauthorized` error.
 pub async fn oo_validator(
     req: ServiceRequest,
-    auth_info: AuthExtractor,
+    auth_result: Result<AuthExtractor, Error>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let path_prefix = "/api/";
-    oo_validator_internal(req, auth_info, path_prefix).await
+    let path = extract_relative_path(req.request().path(), path_prefix);
+    let path_columns = path.split('/').collect::<Vec<&str>>();
+    let is_short_url = is_short_url_path(&path_columns);
+
+    let auth_info = match auth_result {
+        Ok(info) => info,
+        Err(e) => {
+            return if is_short_url {
+                Err(handle_auth_failure_for_redirect(req, &e))
+            } else {
+                Err((e, req))
+            };
+        }
+    };
+
+    match oo_validator_internal(req, auth_info, path_prefix).await {
+        Ok(service_req) => Ok(service_req),
+        Err((err, err_req)) => {
+            if is_short_url {
+                Err(handle_auth_failure_for_redirect(err_req, &err))
+            } else {
+                Err((err, err_req))
+            }
+        }
+    }
 }
 
 /// Validates the authentication information in the request and returns the request if valid, or an
@@ -671,11 +761,10 @@ pub async fn validator_proxy_url(
 pub(crate) async fn check_permissions(
     user_id: &str,
     auth_info: AuthExtractor,
-    role: Option<UserRole>,
+    role: UserRole,
+    _is_external: bool,
 ) -> bool {
-    use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
-
-    if !O2_CONFIG.openfga.enabled {
+    if !get_o2_config().openfga.enabled || role.eq(&UserRole::Root) {
         return true;
     }
 
@@ -684,17 +773,6 @@ pub(crate) async fn check_permissions(
         object_str.replace("##user_id##", user_id)
     } else {
         object_str
-    };
-    let role = match role {
-        Some(role) => {
-            if role.eq(&UserRole::Root) {
-                // root user should have access to everything , bypass check in openfga
-                return true;
-            } else {
-                format!("{role}")
-            }
-        }
-        None => "".to_string(),
     };
     let org_id = if auth_info.org_id.eq("organizations") {
         user_id
@@ -708,7 +786,7 @@ pub(crate) async fn check_permissions(
         &auth_info.method,
         &obj_str,
         &auth_info.parent_id,
-        &role,
+        &role.to_string(),
     )
     .await
 }
@@ -717,7 +795,8 @@ pub(crate) async fn check_permissions(
 pub(crate) async fn check_permissions(
     _user_id: &str,
     _auth_info: AuthExtractor,
-    _role: Option<UserRole>,
+    _role: UserRole,
+    _is_external: bool,
 ) -> bool {
     true
 }
@@ -727,35 +806,97 @@ async fn list_objects(
     user_id: &str,
     permission: &str,
     object_type: &str,
+    org_id: &str,
 ) -> Result<Vec<String>, anyhow::Error> {
     o2_enterprise::enterprise::openfga::authorizer::authz::list_objects(
         user_id,
         permission,
         object_type,
+        org_id,
     )
     .await
 }
 
 #[cfg(feature = "enterprise")]
 pub(crate) async fn list_objects_for_user(
-    _org_id: &str,
+    org_id: &str,
     user_id: &str,
     permission: &str,
     object_type: &str,
 ) -> Result<Option<Vec<String>>, Error> {
-    use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
-
-    if !is_root_user(user_id) && O2_CONFIG.openfga.enabled && O2_CONFIG.openfga.list_only_permitted
-    {
-        match crate::handler::http::auth::validator::list_objects(user_id, permission, object_type)
-            .await
+    let o2cfg = get_o2_config();
+    if !is_root_user(user_id) && o2cfg.openfga.enabled && o2cfg.openfga.list_only_permitted {
+        match crate::handler::http::auth::validator::list_objects(
+            user_id,
+            permission,
+            object_type,
+            org_id,
+        )
+        .await
         {
-            Ok(resp) => Ok(Some(resp)),
+            Ok(resp) => {
+                log::debug!(
+                    "list_objects_for_user for user {user_id} from {org_id} org returns: {:#?}",
+                    resp
+                );
+                Ok(Some(resp))
+            }
             Err(_) => Err(ErrorForbidden("Unauthorized Access")),
         }
     } else {
         Ok(None)
     }
+}
+
+/// Helper function to extract the relative path after the base URI and path prefix
+fn extract_relative_path(full_path: &str, path_prefix: &str) -> String {
+    let base_uri = config::get_config().common.base_uri.clone();
+    let full_prefix = format!("{}{}", base_uri, path_prefix);
+    full_path
+        .strip_prefix(&full_prefix)
+        .unwrap_or(full_path)
+        .to_string()
+}
+
+/// Helper function to check if the path corresponds to a short URL
+fn is_short_url_path(path_columns: &[&str]) -> bool {
+    path_columns
+        .get(1)
+        .map_or(false, |&segment| segment.to_lowercase() == "short")
+}
+
+/// Handles authentication failure by logging the error and returning a redirect response.
+///
+/// This function is responsible for logging the authentication failure and returning a redirect
+/// response. It takes in the request and the error message, and returns a tuple containing the
+/// redirect response and the service request.
+fn handle_auth_failure_for_redirect(req: ServiceRequest, error: &Error) -> (Error, ServiceRequest) {
+    let full_url = extract_full_url(&req);
+    let redirect_http = RedirectResponseBuilder::default()
+        .with_query_param("short_url", &full_url)
+        .build();
+    log::warn!(
+        "Authentication failed for path: {}, err: {}, {}",
+        req.path(),
+        error,
+        &redirect_http,
+    );
+    (redirect_http.into(), req)
+}
+
+/// Extracts the full URL from the request.
+fn extract_full_url(req: &ServiceRequest) -> String {
+    let connection_info = req.connection_info();
+    let scheme = connection_info.scheme();
+    let host = connection_info.host();
+    let path = req
+        .request()
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("");
+
+    format!("{}://{}{}", scheme, host, path)
 }
 
 #[cfg(test)]

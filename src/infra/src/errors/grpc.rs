@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -56,6 +56,7 @@ impl From<DataFusionError> for Error {
             };
         }
         if err.contains("parquet not found") {
+            log::error!("[Datafusion] Parquet file not found: {}", err);
             return Error::ErrorCode(ErrorCodes::SearchParquetFileNotFound);
         }
         if err.contains("Invalid function ") {

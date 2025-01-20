@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,27 +15,31 @@
 
 use std::sync::Arc;
 
-use config::{RwAHashMap, RwHashMap};
+use config::{
+    meta::{
+        alerts::{alert::Alert, destinations::Destination, templates::Template},
+        dashboards::reports,
+        function::Transform,
+        promql::ClusterLeader,
+        stream::StreamParams,
+    },
+    RwAHashMap, RwHashMap,
+};
 use dashmap::DashMap;
 use hashbrown::HashMap;
+use infra::table::short_urls::ShortUrlRecord;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use vector_enrichment::TableRegistry;
 
 use crate::{
     common::meta::{
-        alerts,
-        dashboards::reports,
-        functions::{StreamFunctionsList, Transform},
-        maxmind::MaxmindClient,
-        organization::OrganizationSetting,
-        pipelines::PipeLine,
-        prom::ClusterLeader,
-        syslog::SyslogRoute,
-        user::User,
+        maxmind::MaxmindClient, organization::OrganizationSetting, syslog::SyslogRoute, user::User,
     },
+    handler::http::request::websocket::session::WsSession,
     service::{
         db::scheduler as db_scheduler, enrichment::StreamTable, enrichment_table::geoip::Geoip,
+        pipeline::batch_execution::ExecutablePipeline,
     },
 };
 
@@ -46,8 +50,6 @@ pub static BUILD_DATE: &str = env!("GIT_BUILD_DATE");
 
 // global cache variables
 pub static KVS: Lazy<RwHashMap<String, bytes::Bytes>> = Lazy::new(Default::default);
-pub static STREAM_FUNCTIONS: Lazy<RwHashMap<String, StreamFunctionsList>> =
-    Lazy::new(DashMap::default);
 pub static QUERY_FUNCTIONS: Lazy<RwHashMap<String, Transform>> = Lazy::new(DashMap::default);
 pub static USERS: Lazy<RwHashMap<String, User>> = Lazy::new(DashMap::default);
 pub static USERS_RUM_TOKEN: Lazy<Arc<RwHashMap<String, User>>> =
@@ -60,14 +62,11 @@ pub static METRIC_CLUSTER_MAP: Lazy<Arc<RwAHashMap<String, Vec<String>>>> =
     Lazy::new(|| Arc::new(tokio::sync::RwLock::new(HashMap::new())));
 pub static METRIC_CLUSTER_LEADER: Lazy<Arc<RwAHashMap<String, ClusterLeader>>> =
     Lazy::new(|| Arc::new(tokio::sync::RwLock::new(HashMap::new())));
-pub static STREAM_ALERTS: Lazy<RwAHashMap<String, Vec<alerts::Alert>>> =
-    Lazy::new(Default::default);
+pub static STREAM_ALERTS: Lazy<RwAHashMap<String, Vec<Alert>>> = Lazy::new(Default::default);
 pub static REALTIME_ALERT_TRIGGERS: Lazy<RwAHashMap<String, db_scheduler::Trigger>> =
     Lazy::new(Default::default);
-pub static ALERTS_TEMPLATES: Lazy<RwHashMap<String, alerts::templates::Template>> =
-    Lazy::new(Default::default);
-pub static ALERTS_DESTINATIONS: Lazy<RwHashMap<String, alerts::destinations::Destination>> =
-    Lazy::new(Default::default);
+pub static ALERTS_TEMPLATES: Lazy<RwHashMap<String, Template>> = Lazy::new(Default::default);
+pub static ALERTS_DESTINATIONS: Lazy<RwHashMap<String, Destination>> = Lazy::new(Default::default);
 pub static DASHBOARD_REPORTS: Lazy<RwHashMap<String, reports::Report>> =
     Lazy::new(Default::default);
 pub static SYSLOG_ROUTES: Lazy<RwHashMap<String, SyslogRoute>> = Lazy::new(Default::default);
@@ -85,5 +84,15 @@ pub static GEOIP_CITY_TABLE: Lazy<Arc<RwLock<Option<Geoip>>>> =
 pub static GEOIP_ASN_TABLE: Lazy<Arc<RwLock<Option<Geoip>>>> =
     Lazy::new(|| Arc::new(RwLock::new(None)));
 
+#[cfg(feature = "enterprise")]
+pub static GEOIP_ENT_TABLE: Lazy<Arc<RwLock<Option<Geoip>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(None)));
+
+pub static STREAM_EXECUTABLE_PIPELINES: Lazy<RwAHashMap<StreamParams, ExecutablePipeline>> =
+    Lazy::new(Default::default);
+pub static PIPELINE_STREAM_MAPPING: Lazy<RwAHashMap<String, StreamParams>> =
+    Lazy::new(Default::default);
 pub static USER_SESSIONS: Lazy<RwHashMap<String, String>> = Lazy::new(Default::default);
-pub static STREAM_PIPELINES: Lazy<RwHashMap<String, PipeLine>> = Lazy::new(DashMap::default);
+pub static SHORT_URLS: Lazy<RwHashMap<String, ShortUrlRecord>> = Lazy::new(DashMap::default);
+// TODO: Implement rate limiting for maximum number of sessions
+pub static WS_SESSIONS: Lazy<RwHashMap<String, WsSession>> = Lazy::new(DashMap::default);

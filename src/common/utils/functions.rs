@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,12 +15,14 @@
 
 use std::collections::HashMap;
 
-use config::{GEO_IP_ASN_ENRICHMENT_TABLE, GEO_IP_CITY_ENRICHMENT_TABLE};
+use config::{
+    meta::function::VRLCompilerConfig, GEO_IP_ASN_ENRICHMENT_TABLE, GEO_IP_CITY_ENRICHMENT_TABLE,
+};
 use vector_enrichment::{Table, TableRegistry};
 
 use crate::common::{
     infra::config::{ENRICHMENT_TABLES, GEOIP_ASN_TABLE, GEOIP_CITY_TABLE},
-    meta::{functions::VRLCompilerConfig, organization::DEFAULT_ORG},
+    meta::organization::DEFAULT_ORG,
 };
 
 pub async fn get_all_transform_keys(org_id: &str) -> Vec<String> {
@@ -55,6 +57,8 @@ pub fn get_vrl_compiler_config(org_id: &str) -> VRLCompilerConfig {
             );
         }
     }
+    drop(en_tables);
+
     if GEOIP_CITY_TABLE.read().is_some() {
         tables.insert(
             GEO_IP_CITY_ENRICHMENT_TABLE.to_owned(),
@@ -67,6 +71,20 @@ pub fn get_vrl_compiler_config(org_id: &str) -> VRLCompilerConfig {
             Box::new(GEOIP_ASN_TABLE.read().as_ref().unwrap().clone()),
         );
     }
+    #[cfg(feature = "enterprise")]
+    if o2_enterprise::enterprise::common::infra::config::get_config()
+        .common
+        .enable_enterprise_mmdb
+    {
+        let geoip_ent = crate::common::infra::config::GEOIP_ENT_TABLE.read();
+        if let Some(table) = geoip_ent.as_ref() {
+            tables.insert(
+                    o2_enterprise::enterprise::common::infra::config::GEO_IP_ENTERPRISE_ENRICHMENT_TABLE
+                        .to_owned(),Box::new(table.clone())
+                );
+        }
+    };
+
     registry.load(tables);
     let mut config = vrl::compiler::CompileConfig::default();
     config.set_custom(registry);

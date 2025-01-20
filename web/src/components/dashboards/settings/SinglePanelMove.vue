@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -81,7 +81,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           <AddTab
             :edit-mode="isTabEditMode"
             :tabId="selectedTabIdToEdit"
-            :dashboardData="currentDashboardData.data"
+            :dashboard-id="currentDashboardData.data.dashboardId"
             @refresh="refreshRequired"
             data-test="dashboard-tab-move-add-tab-dialog"
           />

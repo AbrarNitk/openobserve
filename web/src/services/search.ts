@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,7 +13,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { generateTraceContext, getWebSocketUrl } from "@/utils/zincutils";
 import http from "./http";
+import stream from "./stream";
 
 const search = {
   search: (
@@ -21,25 +23,42 @@ const search = {
       org_identifier,
       query,
       page_type = "logs",
+      traceparent,
+      dashboard_id,
+      folder_id,
     }: {
       org_identifier: string;
       query: any;
       page_type: string;
+      traceparent?: string;
+      dashboard_id?: string;
+      folder_id?: string;
     },
-    search_type: string = "UI"
+    search_type: string = "UI",
   ) => {
+    if (!traceparent) traceparent = generateTraceContext()?.traceparent;
+    const use_cache: boolean =
+      (window as any).use_cache !== undefined
+        ? (window as any).use_cache
+        : true;
     // const url = `/api/${org_identifier}/_search?type=${page_type}&search_type=${search_type}`;
-    let url = `/api/${org_identifier}/_search?type=${page_type}&search_type=${search_type}`;
+    let url = `/api/${org_identifier}/_search?type=${page_type}&search_type=${search_type}&use_cache=${use_cache}`;
+    if (dashboard_id) url += `&dashboard_id=${dashboard_id}`;
+    if (folder_id) url += `&folder_id=${folder_id}`;
     if (typeof query.query.sql != "string") {
-      url = `/api/${org_identifier}/_search_multi?type=${page_type}&search_type=${search_type}`;
+      url = `/api/${org_identifier}/_search_multi?type=${page_type}&search_type=${search_type}&use_cache=${use_cache}`;
       if (query.hasOwnProperty("aggs")) {
-        return http().post(url, { ...query.query, aggs: query.aggs });
+        return http({ headers: { traceparent } }).post(url, {
+          ...query.query,
+          aggs: query.aggs,
+        });
       } else {
-        return http().post(url, query.query);
+        return http({ headers: { traceparent } }).post(url, query.query);
       }
     }
-    return http().post(url, query);
+    return http({ headers: { traceparent } }).post(url, query);
   },
+
   search_around: ({
     org_identifier,
     index,
@@ -51,6 +70,7 @@ const search = {
     regions,
     clusters,
     is_multistream,
+    traceparent,
   }: {
     org_identifier: string;
     index: string;
@@ -62,10 +82,11 @@ const search = {
     regions: string;
     clusters: string;
     is_multistream: boolean;
+    traceparent: string;
   }) => {
     // let url = `/api/${org_identifier}/${index}/_around?key=${key}&size=${size}&sql=${query_context}&type=${stream_type}`;
     let url: string = "";
-    if(is_multistream) {
+    if (is_multistream) {
       url = `/api/${org_identifier}/${index}/_around_multi?key=${key}&size=${size}&sql=${query_context}&type=${stream_type}`;
     } else {
       url = `/api/${org_identifier}/${index}/_around?key=${key}&size=${size}&sql=${query_context}&type=${stream_type}`;
@@ -81,7 +102,7 @@ const search = {
     if (clusters.trim() != "") {
       url = url + `&clusters=${clusters}`;
     }
-    return http().get(url);
+    return http({ headers: { traceparent } }).get(url);
   },
   metrics_query_range: ({
     org_identifier,
@@ -95,7 +116,7 @@ const search = {
     end_time: number;
   }) => {
     const url = `/api/${org_identifier}/prometheus/api/v1/query_range?start=${start_time}&end=${end_time}&step=0&query=${encodeURIComponent(
-      query
+      query,
     )}`;
     return http().get(url);
   },
@@ -152,29 +173,55 @@ const search = {
     org_identifier,
     query,
     page_type = "logs",
+    traceparent,
   }: {
     org_identifier: string;
     query: any;
     page_type: string;
+    traceparent: string;
   }) => {
     // const url = `/api/${org_identifier}/_search_partition?type=${page_type}`;
+
     let url = `/api/${org_identifier}/_search_partition?type=${page_type}`;
     if (typeof query.sql != "string") {
       url = `/api/${org_identifier}/_search_partition_multi?type=${page_type}`;
     }
-    return http().post(url, query);
+
+    return http({
+      headers: { traceparent },
+    }).post(url, query);
   },
   get_running_queries: (org_identifier: string) => {
     const url = `/api/${org_identifier}/query_manager/status`;
     return http().get(url);
   },
-  delete_running_query: (org_identifier: string, traceID: string) => {
-    const url = `/api/${org_identifier}/query_manager/${traceID}`;
-    return http().delete(url);
+  delete_running_queries: (org_identifier: string, traceIDs: string[]) => {
+    const url = `/api/${org_identifier}/query_manager/cancel`;
+    return http().put(url, traceIDs);
   },
   get_regions: () => {
     const url = `/api/clusters`;
     return http().get(url);
+  },
+  get_history: (org_identifier: string, startTime = null, endTime = null) => {
+    const payload: any = {
+      stream_type: "logs",
+      org_identifier,
+      user_email: null,
+    };
+    // Add startTime and endTime to the payload if provided
+    if (startTime) {
+      payload.start_time = startTime;
+    }
+
+    if (endTime) {
+      payload.end_time = endTime;
+    }
+
+    return http().post(
+      `/api/${org_identifier}/_search_history`,
+      payload, // Send the payload as the request body
+    );
   },
 };
 

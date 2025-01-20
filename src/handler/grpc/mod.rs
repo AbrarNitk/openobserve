@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,13 +13,38 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
 use config::ider;
+use opentelemetry::propagation::Extractor;
 use proto::cluster_rpc;
 
 use crate::service::promql;
 
 pub mod auth;
+pub mod flight;
 pub mod request;
+
+pub struct MetadataMap<'a>(&'a tonic::metadata::MetadataMap);
+
+impl Extractor for MetadataMap<'_> {
+    /// Get a value for a key from the MetadataMap.  If the value can't be
+    /// converted to &str, returns None
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|metadata| metadata.to_str().ok())
+    }
+
+    /// Collect all the keys from the MetadataMap.
+    fn keys(&self) -> Vec<&str> {
+        self.0
+            .keys()
+            .map(|key| match key {
+                tonic::metadata::KeyRef::Ascii(v) => v.as_str(),
+                tonic::metadata::KeyRef::Binary(v) => v.as_str(),
+            })
+            .collect::<Vec<_>>()
+    }
+}
 
 impl From<promql::MetricsQueryRequest> for cluster_rpc::MetricsQueryRequest {
     fn from(req: promql::MetricsQueryRequest) -> Self {
@@ -28,6 +53,7 @@ impl From<promql::MetricsQueryRequest> for cluster_rpc::MetricsQueryRequest {
             start: req.start,
             end: req.end,
             step: req.step,
+            query_exemplars: req.query_exemplars,
         };
 
         let job = cluster_rpc::Job {
@@ -40,10 +66,10 @@ impl From<promql::MetricsQueryRequest> for cluster_rpc::MetricsQueryRequest {
         cluster_rpc::MetricsQueryRequest {
             job: Some(job),
             org_id: "".to_string(),
-            stype: cluster_rpc::SearchType::User.into(),
             need_wal: false,
             query: Some(req_query),
             timeout: 0,
+            no_cache: req.no_cache.unwrap_or_default(),
         }
     }
 }
@@ -77,6 +103,26 @@ impl From<&promql::value::Sample> for cluster_rpc::Sample {
         cluster_rpc::Sample {
             time: req.timestamp,
             value: req.value,
+        }
+    }
+}
+
+impl From<&promql::value::Exemplar> for cluster_rpc::Exemplar {
+    fn from(req: &promql::value::Exemplar) -> Self {
+        cluster_rpc::Exemplar {
+            time: req.timestamp,
+            value: req.value,
+            labels: req.labels.iter().map(|x| x.as_ref().into()).collect(),
+        }
+    }
+}
+
+impl From<&cluster_rpc::Exemplar> for promql::value::Exemplar {
+    fn from(req: &cluster_rpc::Exemplar) -> Self {
+        promql::value::Exemplar {
+            timestamp: req.time,
+            value: req.value,
+            labels: req.labels.iter().map(|x| Arc::new(x.into())).collect(),
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -23,11 +23,24 @@ const dashboards = {
     desc: boolean,
     name: string,
     organization: string,
-    folderId: string
+    folderId: string,
+    title: string
   ) => {
-    return http().get(
-      `/api/${organization}/dashboards?page_num=${page_num}&page_size=${page_size}&sort_by=${sort_by}&desc=${desc}&name=${name}&folder=${folderId}`
-    );
+    const params :any = {
+      page_num,
+      page_size,
+      sort_by,
+      desc,
+      name,
+    };
+    if(folderId) {
+      params.folder = folderId;
+    }
+    // Only add title if it is provided
+    if (title) {
+      params.title = title;
+    }
+    return http().get(`/api/${organization}/dashboards`, { params });
   },
   create: (organization: string, data: any, folderId?: string) => {
     return http().post(
@@ -43,19 +56,20 @@ const dashboards = {
       }`
     );
   },
-  get_Dashboard: (org_identifier: string) => {
-    return http().get(`/api/dashboards/passcode/${org_identifier}`);
+  get_Dashboard: (org_identifier: string, dashboardID: string) => {
+    return http().get(`/api/${org_identifier}/dashboards/${dashboardID}`);
   },
   save: (
     organization: string,
     dashboardID: string,
     data: any,
-    folderId?: string
+    folderId?: string,
+    hash?: any
   ) => {
     return http().put(
       `/api/${organization}/dashboards/${dashboardID}?folder=${
         folderId ?? "default"
-      }`,
+      }&hash=${hash}`,
       data,
       { headers: { "Content-Type": "application/json; charset=UTF-8" } }
     );

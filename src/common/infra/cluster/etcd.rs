@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,10 +13,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::atomic::Ordering;
+
 use config::{
     cluster::*,
     get_config,
-    meta::cluster::{Node, NodeStatus, Role},
+    meta::cluster::{Node, NodeStatus, Role, RoleGroup},
     utils::json,
 };
 use etcd_client::PutOptions;
@@ -26,8 +28,8 @@ use infra::{
     errors::{Error, Result},
 };
 
-/// Register and keepalive the node to cluster
-pub(crate) async fn register_and_keepalive() -> Result<()> {
+/// Register and keep alive the node to cluster
+pub(crate) async fn register_and_keep_alive() -> Result<()> {
     if let Err(e) = register().await {
         log::error!("[CLUSTER] register failed: {}", e);
         return Err(e);
@@ -35,7 +37,16 @@ pub(crate) async fn register_and_keepalive() -> Result<()> {
 
     // keep alive
     tokio::task::spawn(async move {
+        // check if the node is already online
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if is_online() {
+                break;
+            }
+        }
+        // after the node is online, keep alive
         let mut need_online_again = false;
+        let ttl = get_config().limit.node_heartbeat_ttl;
         loop {
             if is_offline() {
                 break;
@@ -43,18 +54,13 @@ pub(crate) async fn register_and_keepalive() -> Result<()> {
 
             if need_online_again {
                 if let Err(e) = set_online(true).await {
-                    log::error!("[CLUSTER] keepalive failed: {}", e);
+                    log::error!("[CLUSTER] keep alive failed: {}", e);
                     continue;
                 }
             }
 
             let lease_id = unsafe { LOCAL_NODE_KEY_LEASE_ID };
-            let ret = etcd::keepalive_lease_id(
-                lease_id,
-                get_config().limit.node_heartbeat_ttl,
-                is_offline,
-            )
-            .await;
+            let ret = etcd::keep_alive_lease_id(lease_id, ttl, is_offline).await;
             if ret.is_ok() {
                 break;
             }
@@ -69,7 +75,7 @@ pub(crate) async fn register_and_keepalive() -> Result<()> {
             {
                 break;
             }
-            log::error!("[CLUSTER] keepalive lease id expired or revoked, set node online again.");
+            log::error!("[CLUSTER] keep alive lease id expired or revoked, set node online again.");
             // set node online again
             need_online_again = true;
         }
@@ -100,14 +106,19 @@ async fn register() -> Result<()> {
     let mut node_ids = Vec::new();
     let mut w = super::NODES.write().await;
     for node in node_list {
-        if is_querier(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::Querier).await;
+        if node.is_interactive_querier() {
+            super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Interactive))
+                .await;
         }
-        if is_compactor(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::Compactor).await;
+        if node.is_background_querier() {
+            super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Background))
+                .await;
         }
-        if is_flatten_compactor(&node.role) {
-            super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor).await;
+        if node.is_compactor() {
+            super::add_node_to_consistent_hash(&node, &Role::Compactor, None).await;
+        }
+        if node.is_flatten_compactor() {
+            super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor, None).await;
         }
         node_ids.push(node.id);
         w.insert(node.uuid.clone(), node);
@@ -133,14 +144,25 @@ async fn register() -> Result<()> {
     }
 
     // 4. join the cluster
-    let key = format!("{}nodes/{}", &cfg.etcd.prefix, *LOCAL_NODE_UUID);
+    let key = format!("{}nodes/{}", &cfg.etcd.prefix, LOCAL_NODE.uuid);
     let node = Node {
         id: new_node_id,
-        uuid: LOCAL_NODE_UUID.clone(),
+        uuid: LOCAL_NODE.uuid.clone(),
         name: cfg.common.instance_name.clone(),
-        http_addr: format!("http://{}:{}", get_local_http_ip(), cfg.http.port),
-        grpc_addr: format!("http://{}:{}", get_local_grpc_ip(), cfg.grpc.port),
-        role: LOCAL_NODE_ROLE.clone(),
+        http_addr: format!(
+            "{}://{}:{}",
+            get_http_schema(),
+            get_local_http_ip(),
+            cfg.http.port
+        ),
+        grpc_addr: format!(
+            "{}://{}:{}",
+            get_grpc_schema(),
+            get_local_grpc_ip(),
+            cfg.grpc.port
+        ),
+        role: LOCAL_NODE.role.clone(),
+        role_group: LOCAL_NODE.role_group,
         cpu_num: cfg.limit.cpu_num as u64,
         status: NodeStatus::Prepare,
         scheduled: true,
@@ -149,18 +171,23 @@ async fn register() -> Result<()> {
     let val = json::to_string(&node).unwrap();
 
     // cache local node
-    if is_querier(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::Querier).await;
+    if node.is_interactive_querier() {
+        super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Interactive))
+            .await;
     }
-    if is_compactor(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::Compactor).await;
+    if node.is_background_querier() {
+        super::add_node_to_consistent_hash(&node, &Role::Querier, Some(RoleGroup::Background))
+            .await;
     }
-    if is_flatten_compactor(&node.role) {
-        super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor).await;
+    if node.is_compactor() {
+        super::add_node_to_consistent_hash(&node, &Role::Compactor, None).await;
+    }
+    if node.is_flatten_compactor() {
+        super::add_node_to_consistent_hash(&node, &Role::FlattenCompactor, None).await;
     }
 
     let mut w = super::NODES.write().await;
-    w.insert(LOCAL_NODE_UUID.clone(), node.clone());
+    w.insert(LOCAL_NODE.uuid.clone(), node.clone());
     drop(w);
 
     // register node to cluster
@@ -202,7 +229,7 @@ pub(crate) async fn set_offline(new_lease_id: bool) -> Result<()> {
 pub(crate) async fn set_status(status: NodeStatus, new_lease_id: bool) -> Result<()> {
     let cfg = get_config();
     // set node status to online
-    let node = match super::NODES.read().await.get(LOCAL_NODE_UUID.as_str()) {
+    let node = match super::NODES.read().await.get(LOCAL_NODE.uuid.as_str()) {
         Some(node) => {
             let mut val = node.clone();
             val.status = status.clone();
@@ -210,11 +237,22 @@ pub(crate) async fn set_status(status: NodeStatus, new_lease_id: bool) -> Result
         }
         None => Node {
             id: unsafe { LOCAL_NODE_ID },
-            uuid: LOCAL_NODE_UUID.clone(),
+            uuid: LOCAL_NODE.uuid.clone(),
             name: cfg.common.instance_name.clone(),
-            http_addr: format!("http://{}:{}", get_local_node_ip(), cfg.http.port),
-            grpc_addr: format!("http://{}:{}", get_local_node_ip(), cfg.grpc.port),
-            role: LOCAL_NODE_ROLE.clone(),
+            http_addr: format!(
+                "{}://{}:{}",
+                get_http_schema(),
+                get_local_http_ip(),
+                cfg.http.port
+            ),
+            grpc_addr: format!(
+                "{}://{}:{}",
+                get_grpc_schema(),
+                get_local_grpc_ip(),
+                cfg.grpc.port
+            ),
+            role: LOCAL_NODE.role.clone(),
+            role_group: LOCAL_NODE.role_group,
             cpu_num: cfg.limit.cpu_num as u64,
             status: status.clone(),
             scheduled: true,
@@ -223,9 +261,7 @@ pub(crate) async fn set_status(status: NodeStatus, new_lease_id: bool) -> Result
     };
     let val = json::to_string(&node).unwrap();
 
-    unsafe {
-        LOCAL_NODE_STATUS = status;
-    }
+    LOCAL_NODE_STATUS.store(status as _, Ordering::Release);
 
     if new_lease_id {
         // get new lease id
@@ -240,7 +276,7 @@ pub(crate) async fn set_status(status: NodeStatus, new_lease_id: bool) -> Result
         }
     }
 
-    let key = format!("{}nodes/{}", &cfg.etcd.prefix, *LOCAL_NODE_UUID);
+    let key = format!("{}nodes/{}", &cfg.etcd.prefix, LOCAL_NODE.uuid);
     let opt = PutOptions::new().with_lease(unsafe { LOCAL_NODE_KEY_LEASE_ID });
     let mut client = etcd::get_etcd_client().await.clone();
     if let Err(e) = client.put(key, val, Some(opt)).await {
@@ -252,7 +288,7 @@ pub(crate) async fn set_status(status: NodeStatus, new_lease_id: bool) -> Result
 
 /// Leave cluster
 pub(crate) async fn leave() -> Result<()> {
-    let key = format!("{}nodes/{}", get_config().etcd.prefix, *LOCAL_NODE_UUID);
+    let key = format!("{}nodes/{}", get_config().etcd.prefix, LOCAL_NODE.uuid);
     let mut client = etcd::get_etcd_client().await.clone();
     if let Err(e) = client.delete(key, None).await {
         return Err(Error::Message(format!("leave node error: {}", e)));
@@ -262,7 +298,7 @@ pub(crate) async fn leave() -> Result<()> {
 }
 
 pub(crate) async fn update_local_node(node: &Node) -> Result<()> {
-    let key = format!("{}nodes/{}", get_config().etcd.prefix, *LOCAL_NODE_UUID);
+    let key = format!("{}nodes/{}", get_config().etcd.prefix, LOCAL_NODE.uuid);
     let opt = PutOptions::new().with_lease(unsafe { LOCAL_NODE_KEY_LEASE_ID });
     let val = json::to_string(&node).unwrap();
     let mut client = etcd::get_etcd_client().await.clone();

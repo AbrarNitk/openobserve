@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,10 +16,23 @@
 use std::{str::FromStr, time::Duration};
 
 use actix_web::http;
+use async_trait::async_trait;
 use chromiumoxide::{browser::Browser, cdp::browser_protocol::page::PrintToPdfParams, Page};
-use config::{get_chrome_launch_options, get_config, SMTP_CLIENT};
+use chrono::Timelike;
+use config::{
+    get_chrome_launch_options, get_config,
+    meta::dashboards::{
+        datetime_now,
+        reports::{
+            HttpReportPayload, Report, ReportDashboard, ReportDestination, ReportEmailDetails,
+            ReportFrequencyType, ReportListFilters, ReportTimerangeType,
+        },
+    },
+    SMTP_CLIENT,
+};
 use cron::Schedule;
 use futures::{future::try_join_all, StreamExt};
+use infra::table;
 use lettre::{
     message::{header::ContentType, MultiPart, SinglePart},
     AsyncTransport, Message,
@@ -28,16 +41,10 @@ use reqwest::Client;
 
 use crate::{
     common::{
-        meta::{
-            authz::Authz,
-            dashboards::reports::{
-                HttpReportPayload, Report, ReportDashboard, ReportDestination, ReportEmailDetails,
-                ReportFrequencyType, ReportTimerangeType,
-            },
-        },
-        utils::auth::{remove_ownership, set_ownership},
+        meta::authz::Authz,
+        utils::auth::{is_ofga_unsupported, remove_ownership, set_ownership},
     },
-    service::db,
+    service::{db, short_url},
 };
 
 pub async fn save(
@@ -66,6 +73,13 @@ pub async fn save(
     if !name.is_empty() {
         report.name = name.to_string();
     }
+
+    // Don't allow the characters not supported by ofga
+    if is_ofga_unsupported(&report.name) {
+        return Err(anyhow::anyhow!(
+            "Report name cannot contain ':', '#', '?', '&', '%', quotes and space characters"
+        ));
+    }
     if report.name.is_empty() {
         return Err(anyhow::anyhow!("Report name is required"));
     }
@@ -74,6 +88,17 @@ pub async fn save(
     }
 
     if report.frequency.frequency_type == ReportFrequencyType::Cron {
+        let cron_exp = report.frequency.cron.clone();
+        if cron_exp.starts_with("* ") {
+            let (_, rest) = cron_exp.split_once(" ").unwrap();
+            let now = chrono::Utc::now().second().to_string();
+            report.frequency.cron = format!("{now} {rest}");
+            log::debug!(
+                "New cron expression for report {}: {}",
+                report.name,
+                report.frequency.cron
+            );
+        }
         // Check if the cron expression is valid
         Schedule::from_str(&report.frequency.cron)?;
     } else if report.frequency.interval == 0 {
@@ -81,20 +106,25 @@ pub async fn save(
     }
 
     match db::dashboards::reports::get(org_id, &report.name).await {
-        Ok(_) => {
+        Ok(old_report) => {
             if create {
                 return Err(anyhow::anyhow!("Report already exists"));
             }
+            report.last_triggered_at = old_report.last_triggered_at;
+            report.owner = old_report.owner;
+            report.updated_at = Some(datetime_now());
         }
         Err(_) => {
             if !create {
                 return Err(anyhow::anyhow!("Report not found"));
+            } else {
+                report.last_triggered_at = None;
             }
         }
     }
 
-    // Atleast one `ReportDashboard` and `ReportDestination` needs to be present
-    if report.dashboards.is_empty() || report.destinations.is_empty() {
+    // Atleast one `ReportDashboard` needs to be present
+    if report.dashboards.is_empty() {
         return Err(anyhow::anyhow!(
             "Atleast one dashboard/destination is required"
         ));
@@ -112,9 +142,10 @@ pub async fn save(
         // Supports only one tab for now
         let tab_id = &dashboard.tabs[0];
         tasks.push(async move {
-            let dashboard = db::dashboards::get(org_id, dash_id, folder).await?;
+            let maybe_dashboard =
+                table::dashboards::get_from_folder(org_id, folder, dash_id).await?;
             // Check if the tab_id exists
-            if let Some(dashboard) = dashboard.v3 {
+            if let Some(dashboard) = maybe_dashboard.and_then(|d| d.v3) {
                 let mut tab_found = false;
                 for tab in dashboard.tabs {
                     if &tab.tab_id == tab_id {
@@ -154,11 +185,14 @@ pub async fn get(org_id: &str, name: &str) -> Result<Report, anyhow::Error> {
 
 pub async fn list(
     org_id: &str,
+    filters: ReportListFilters,
     permitted: Option<Vec<String>>,
 ) -> Result<Vec<Report>, anyhow::Error> {
     match db::dashboards::reports::list(org_id).await {
         Ok(reports) => {
             let mut result = Vec::new();
+            let dashboard = filters.dashboard;
+            let destination_less = filters.destination_less;
             for report in reports {
                 if permitted.is_none()
                     || permitted
@@ -170,7 +204,29 @@ pub async fn list(
                         .unwrap()
                         .contains(&format!("report:_all_{}", org_id))
                 {
-                    result.push(report);
+                    let mut should_include = true;
+                    if let Some(dashboard_id) = dashboard.as_ref() {
+                        // Check if report contains this dashboard
+                        if report
+                            .dashboards
+                            .iter()
+                            .any(|x| !x.dashboard.eq(dashboard_id))
+                        {
+                            should_include = false;
+                        }
+                    }
+                    if let Some(destination_less) = destination_less.as_ref() {
+                        // destination_less = true -> push only if the report is destination-less
+                        // destination_less = false -> push only if the report has destinations
+                        if (*destination_less && !report.destinations.is_empty())
+                            || (!*destination_less && report.destinations.is_empty())
+                        {
+                            should_include = false;
+                        }
+                    }
+                    if should_include {
+                        result.push(report);
+                    }
                 }
             }
             Ok(result)
@@ -232,27 +288,34 @@ pub async fn enable(
         .map_err(|e| (http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
-impl Report {
+#[async_trait]
+pub trait SendReport {
     /// Sends the report to subscribers
-    pub async fn send_subscribers(&self) -> Result<(), anyhow::Error> {
+    async fn send_subscribers(&self) -> Result<(), anyhow::Error>;
+}
+
+#[async_trait]
+impl SendReport for Report {
+    /// Sends the report to subscribers
+    async fn send_subscribers(&self) -> Result<(), anyhow::Error> {
         if self.dashboards.is_empty() {
             return Err(anyhow::anyhow!("Atleast one dashboard is required"));
         }
 
         let cfg = get_config();
-        if !cfg.common.report_server_url.is_empty() {
-            let mut recepients = vec![];
-            for recepient in &self.destinations {
-                match recepient {
-                    ReportDestination::Email(email) => recepients.push(email.clone()),
-                }
+        let mut recipients = vec![];
+        for recipient in &self.destinations {
+            match recipient {
+                ReportDestination::Email(email) => recipients.push(email.clone()),
             }
-
+        }
+        let no_of_recipients = recipients.len();
+        if !cfg.common.report_server_url.is_empty() {
             let report_data = HttpReportPayload {
                 dashboards: self.dashboards.clone(),
                 email_details: ReportEmailDetails {
                     title: self.title.clone(),
-                    recepients,
+                    recipients,
                     name: self.name.clone(),
                     message: self.message.clone(),
                     dashb_url: format!("{}{}/web", cfg.common.web_url, cfg.common.base_uri),
@@ -260,7 +323,7 @@ impl Report {
             };
 
             let url = url::Url::parse(&format!(
-                "{}/{}/reports/{}/send",
+                "{}/api/{}/reports/{}/send",
                 &cfg.common.report_server_url, &self.org_id, &self.name
             ))
             .unwrap();
@@ -298,63 +361,74 @@ impl Report {
                 &cfg.common.report_user_name,
                 &cfg.common.report_user_password,
                 &self.timezone,
+                no_of_recipients,
+                &self.name,
             )
             .await?;
-            self.send_email(&report.0, report.1).await
+            send_email(self, &report.0, report.1).await
+        }
+    }
+}
+
+/// Sends emails to the [`Report`] recipients. Currently only one pdf data is supported.
+async fn send_email(
+    report: &Report,
+    pdf_data: &[u8],
+    dashb_url: String,
+) -> Result<(), anyhow::Error> {
+    let cfg = get_config();
+    if !cfg.smtp.smtp_enabled {
+        return Err(anyhow::anyhow!("SMTP configuration not enabled"));
+    }
+
+    let mut recipients = vec![];
+    for recipient in &report.destinations {
+        match recipient {
+            ReportDestination::Email(email) => recipients.push(email),
         }
     }
 
-    /// Sends emails to the [`Report`] recepients. Currently only one pdf data is supported.
-    async fn send_email(&self, pdf_data: &[u8], dashb_url: String) -> Result<(), anyhow::Error> {
-        let cfg = get_config();
-        if !cfg.smtp.smtp_enabled {
-            return Err(anyhow::anyhow!("SMTP configuration not enabled"));
+    if recipients.is_empty() {
+        return Ok(());
+    }
+
+    let mut email = Message::builder()
+        .from(cfg.smtp.smtp_from_email.parse()?)
+        .subject(report.title.to_string());
+
+    for recipient in recipients {
+        email = email.to(recipient.parse()?);
+    }
+
+    if !cfg.smtp.smtp_reply_to.is_empty() {
+        email = email.reply_to(cfg.smtp.smtp_reply_to.parse()?);
+    }
+
+    let email = email
+        .multipart(
+            MultiPart::mixed()
+                .singlepart(SinglePart::html(format!(
+                    "{}\n\n<p><a href='{dashb_url}' target='_blank'>Link to dashboard</a></p>",
+                    report.message
+                )))
+                .singlepart(
+                    // Only supports PDF for now, attach the PDF
+                    lettre::message::Attachment::new(format!(
+                        "{}.pdf",
+                        sanitize_filename(&report.title)
+                    ))
+                    .body(pdf_data.to_owned(), ContentType::parse("application/pdf")?),
+                ),
+        )
+        .unwrap();
+
+    // Send the email
+    match SMTP_CLIENT.as_ref().unwrap().send(email).await {
+        Ok(_) => {
+            log::info!("email sent successfully for the report {}", &report.name);
+            Ok(())
         }
-
-        let mut recepients = vec![];
-        for recepient in &self.destinations {
-            match recepient {
-                ReportDestination::Email(email) => recepients.push(email),
-            }
-        }
-
-        let mut email = Message::builder()
-            .from(cfg.smtp.smtp_from_email.parse()?)
-            .subject(format!("Openobserve Report - {}", &self.title));
-
-        for recepient in recepients {
-            email = email.to(recepient.parse()?);
-        }
-
-        if !cfg.smtp.smtp_reply_to.is_empty() {
-            email = email.reply_to(cfg.smtp.smtp_reply_to.parse()?);
-        }
-
-        let email = email
-            .multipart(
-                MultiPart::mixed()
-                    .singlepart(SinglePart::html(self.message.clone()))
-                    .singlepart(SinglePart::html(format!(
-                        "<p><a href='{dashb_url}' target='_blank'>Link to dashboard</a></p>"
-                    )))
-                    .singlepart(
-                        // Only supports PDF for now, attach the PDF
-                        lettre::message::Attachment::new(
-                            self.title.clone(), // Attachment filename
-                        )
-                        .body(pdf_data.to_owned(), ContentType::parse("application/pdf")?),
-                    ),
-            )
-            .unwrap();
-
-        // Send the email
-        match SMTP_CLIENT.as_ref().unwrap().send(email).await {
-            Ok(_) => {
-                log::info!("email sent successfully for the report {}", &self.name);
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("Error sending email: {e}")),
-        }
+        Err(e) => Err(anyhow::anyhow!("Error sending email: {e}")),
     }
 }
 
@@ -364,6 +438,8 @@ async fn generate_report(
     user_id: &str,
     user_pass: &str,
     timezone: &str,
+    no_of_recipients: usize,
+    report_name: &str,
 ) -> Result<(Vec<u8>, String), anyhow::Error> {
     let cfg = get_config();
     // Check if Chrome is enabled, otherwise don't save the report
@@ -426,9 +502,14 @@ async fn generate_report(
 
     // Does not seem to work for single page client application
     page.wait_for_navigation().await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     let timerange = &dashboard.timerange;
+    let search_type_params = if no_of_recipients == 0 {
+        "search_type=ui".to_string()
+    } else {
+        format!("search_type=reports&report_id={org_id}-{report_name}")
+    };
 
     // dashboard link in the email should contain data of the same period as the report
     let (dashb_url, email_dashb_url) = match timerange.range_type {
@@ -436,7 +517,7 @@ async fn generate_report(
             let period = &timerange.period;
             let (time_duration, time_unit) = period.split_at(period.len() - 1);
             let dashb_url = format!(
-                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&searchtype=reports&period={period}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
+                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&{search_type_params}&period={period}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
             );
 
             let time_duration: i64 = time_duration.parse()?;
@@ -486,7 +567,7 @@ async fn generate_report(
         }
         ReportTimerangeType::Absolute => {
             let url = format!(
-                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&searchtype=reports&from={}&to={}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
+                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&{search_type_params}&from={}&to={}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
                 &timerange.from, &timerange.to
             );
             (url.clone(), url)
@@ -498,7 +579,7 @@ async fn generate_report(
     page.goto(&format!("{web_url}/?org_identifier={org_id}"))
         .await?;
     page.wait_for_navigation().await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     log::debug!("headless: navigated to the org_id: {org_id}");
 
     page.goto(&dashb_url).await?;
@@ -520,6 +601,7 @@ async fn generate_report(
 
     if let Err(e) = page.find_element("main").await {
         browser.close().await?;
+        browser.wait().await?;
         handle.await?;
         return Err(anyhow::anyhow!(
             "[REPORT] main element not rendered yet for dashboard {dashboard_id}: {e}"
@@ -527,6 +609,7 @@ async fn generate_report(
     }
     if let Err(e) = page.find_element("div.displayDiv").await {
         browser.close().await?;
+        browser.wait().await?;
         handle.await?;
         return Err(anyhow::anyhow!(
             "[REPORT] div.displayDiv element not rendered yet for dashboard {dashboard_id}: {e}"
@@ -535,16 +618,30 @@ async fn generate_report(
 
     // Last two elements loaded means atleast the metric components have loaded.
     // Convert the page into pdf
-    let pdf_data = page
-        .pdf(PrintToPdfParams {
+    let pdf_data = if no_of_recipients != 0 {
+        page.pdf(PrintToPdfParams {
             landscape: Some(true),
             ..Default::default()
         })
-        .await?;
+        .await?
+    } else {
+        // No need to capture pdf
+        vec![]
+    };
 
     browser.close().await?;
+    browser.wait().await?;
     handle.await?;
     log::debug!("done with headless browser");
+
+    // convert to short_url
+    let email_dashb_url = match short_url::shorten(org_id, &email_dashb_url).await {
+        Ok(short_url) => short_url,
+        Err(e) => {
+            log::error!("Error shortening email dashboard url: {e}");
+            email_dashb_url
+        }
+    };
     Ok((pdf_data, email_dashb_url))
 }
 
@@ -567,6 +664,19 @@ async fn wait_for_panel_data_load(page: &Page) -> Result<(), anyhow::Error> {
             ));
         }
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use config::{get_config, meta::meta_store::MetaStore};
 use hashbrown::HashMap;
+use sea_orm::{DatabaseConnection, SqlxMySqlConnector, SqlxPostgresConnector, SqlxSqliteConnector};
 use tokio::sync::{mpsc, OnceCell};
 
 use crate::errors::{DbError, Error, Result};
@@ -33,11 +34,37 @@ pub static NEED_WATCH: bool = true;
 pub static NO_NEED_WATCH: bool = false;
 
 static DEFAULT: OnceCell<Box<dyn Db>> = OnceCell::const_new();
+static LOCAL_CACHE: OnceCell<Box<dyn Db>> = OnceCell::const_new();
 static CLUSTER_COORDINATOR: OnceCell<Box<dyn Db>> = OnceCell::const_new();
 static SUPER_CLUSTER: OnceCell<Box<dyn Db>> = OnceCell::const_new();
 
+pub const SQLITE_STORE: &str = "sqlite";
+
+pub static ORM_CLIENT: OnceCell<DatabaseConnection> = OnceCell::const_new();
+
+pub async fn connect_to_orm() -> DatabaseConnection {
+    match get_config().common.meta_store.as_str().into() {
+        MetaStore::MySQL => {
+            let pool = mysql::CLIENT.clone();
+            SqlxMySqlConnector::from_sqlx_mysql_pool(pool)
+        }
+        MetaStore::PostgreSQL => {
+            let pool = postgres::CLIENT.clone();
+            SqlxPostgresConnector::from_sqlx_postgres_pool(pool)
+        }
+        _ => {
+            let pool = { sqlite::CLIENT_RW.lock().await.clone() };
+            SqlxSqliteConnector::from_sqlx_sqlite_pool(pool)
+        }
+    }
+}
+
 pub async fn get_db() -> &'static Box<dyn Db> {
     DEFAULT.get_or_init(default).await
+}
+
+pub async fn get_local_cache() -> &'static Box<dyn Db> {
+    LOCAL_CACHE.get_or_init(init_local_cache).await
 }
 
 pub async fn get_coordinator() -> &'static Box<dyn Db> {
@@ -71,6 +98,10 @@ async fn default() -> Box<dyn Db> {
         MetaStore::MySQL => Box::<mysql::MysqlDb>::default(),
         MetaStore::PostgreSQL => Box::<postgres::PostgresDb>::default(),
     }
+}
+
+async fn init_local_cache() -> Box<dyn Db> {
+    Box::<sqlite::SqliteDb>::default()
 }
 
 async fn init_cluster_coordinator() -> Box<dyn Db> {
@@ -232,6 +263,30 @@ pub struct MetaRecord {
     pub key2: String,
     pub start_dt: i64,
     pub value: String,
+}
+
+#[derive(Hash, Clone, Eq, PartialEq)]
+struct DBIndex {
+    name: String,
+    table: String,
+}
+
+pub struct IndexStatement<'a> {
+    pub idx_name: &'a str,
+    pub table: &'a str,
+    pub unique: bool,
+    pub fields: &'a [&'a str],
+}
+
+impl<'a> IndexStatement<'a> {
+    pub fn new(idx_name: &'a str, table: &'a str, unique: bool, fields: &'a [&'a str]) -> Self {
+        Self {
+            idx_name,
+            table,
+            unique,
+            fields,
+        }
+    }
 }
 
 #[cfg(test)]

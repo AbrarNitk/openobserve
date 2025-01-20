@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,11 +16,9 @@
 use std::io::Error;
 
 use actix_web::{delete, get, http, post, put, web, HttpRequest, HttpResponse};
+use config::meta::alerts::destinations::Destination;
 
-use crate::{
-    common::meta::{alerts::destinations::Destination, http::HttpResponse as MetaHttpResponse},
-    service::alerts::destinations,
-};
+use crate::{common::meta::http::HttpResponse as MetaHttpResponse, service::alerts::destinations};
 
 /// CreateDestination
 #[utoipa::path(
@@ -183,7 +181,7 @@ async fn list_destinations(
     ),
     responses(
         (status = 200, description = "Success",   content_type = "application/json", body = HttpResponse),
-        (status = 403, description = "Forbidden", content_type = "application/json", body = HttpResponse),
+        (status = 409, description = "Conflict", content_type = "application/json", body = HttpResponse),
         (status = 404, description = "NotFound",  content_type = "application/json", body = HttpResponse),
         (status = 500, description = "Failure",   content_type = "application/json", body = HttpResponse),
     )
@@ -194,7 +192,7 @@ async fn delete_destination(path: web::Path<(String, String)>) -> Result<HttpRes
     match destinations::delete(&org_id, &name).await {
         Ok(_) => Ok(MetaHttpResponse::ok("Alert destination deleted")),
         Err(e) => match e {
-            (http::StatusCode::FORBIDDEN, e) => Ok(MetaHttpResponse::forbidden(e)),
+            (http::StatusCode::CONFLICT, e) => Ok(MetaHttpResponse::conflict(e)),
             (http::StatusCode::NOT_FOUND, e) => Ok(MetaHttpResponse::not_found(e)),
             (_, e) => Ok(MetaHttpResponse::internal_error(e)),
         },

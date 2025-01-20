@@ -1,10 +1,10 @@
 <!-- eslint-disable no-useless-escape -->
 <template>
-  <div class="q-pa-md">
+  <div class="q-pa-md kubernetes-config-section">
     <div class="text-subtitle1 q-pl-xs q-mt-md">Install cert-manager</div>
     <ContentCopy
       class="q-mt-sm"
-      content="kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.1/cert-manager.yaml"
+      content="kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.1/cert-manager.yaml"
     />
 
     <div class="text-subtitle1 q-pl-xs q-mt-md">
@@ -13,23 +13,12 @@
     </div>
 
     <div class="text-subtitle1 q-pl-xs q-mt-md">Update helm repo</div>
-    <ContentCopy
-      class="q-mt-sm"
-      content="helm repo add openobserve https://charts.openobserve.ai"
-    />
-    <ContentCopy class="q-mt-sm" content="helm repo update" />
+    <ContentCopy class="q-mt-sm" :content="helmUpdateCmd" />
 
     <div class="text-subtitle1 q-pl-xs q-mt-md">
       Install Prometheus operator CRDs(Required by Opentelemetry operator)
     </div>
-    <ContentCopy
-      class="q-mt-sm"
-      content="kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml"
-    />
-    <ContentCopy
-      class="q-mt-sm"
-      content="kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml"
-    />
+    <ContentCopy class="q-mt-sm" :content="crdCommand" />
 
     <div class="text-subtitle1 q-pl-xs q-mt-md">
       Install OpenTelemetry operator
@@ -79,7 +68,8 @@
       >
         <q-tab-panel name="internal" data-test="kubernetes-tab-panels-this">
           <ContentCopy class="q-mt-sm" :content="collectorCmdThisCluster" />
-          <pre>Format of the URL is: http://&lt;helm-release-name&gt;-openobserve-router.&lt;namespace&gt;.svc.cluster.local 
+          <pre>
+Format of the URL is: http://&lt;helm-release-name&gt;-openobserve-router.&lt;namespace&gt;.svc.cluster.local 
 Make changes accordingly to the above URL.
           </pre>
         </q-tab-panel>
@@ -93,7 +83,7 @@ Make changes accordingly to the above URL.
     <hr />
     <div class="text-subtitle1 q-pl-xs q-mt-md">
       Once you have installed the OpenObserve collector, it will:
-      <ol>
+      <ul class="tw-list-disc tw-ml-5">
         <li>Collect metrics from your Kubernetes cluster</li>
         <li>Collect events from your Kubernetes cluster</li>
         <li>Collect logs from your Kubernetes cluster</li>
@@ -102,7 +92,7 @@ Make changes accordingly to the above URL.
           that are written in following languages using OpenTelemetry
           auto-instrumentation. It can be done by setting the following to the
           pod/namespace annotations:
-          <ol>
+          <ul class="tw-list-disc tw-ml-5">
             <li>
               <b>Java:</b> instrumentation.opentelemetry.io/inject-java:
               "openobserve-collector/openobserve-java"
@@ -121,7 +111,7 @@ Make changes accordingly to the above URL.
             </li>
             <li>
               <b>Go (Uses eBPF):</b>
-              <ul>
+              <ul class="tw-list-disc tw-ml-5">
                 <li>
                   instrumentation.opentelemetry.io/inject-go:
                   "openobserve-collector/openobserve-go"
@@ -132,13 +122,19 @@ Make changes accordingly to the above URL.
                 </li>
               </ul>
             </li>
-          </ol>
+          </ul>
         </li>
-      </ol>
+      </ul>
       You can refer and install
-      <a href="https://github.com/openobserve/hotcommerce">HOT commerce</a> app
-      as an example to understand how this works in practice. Refer to
-      <a href="https://github.com/open-telemetry/opentelemetry-operator"
+      <a
+        href="https://github.com/openobserve/hotcommerce"
+        class="hover:tw-underline text-primary"
+        >HOT commerce</a
+      >
+      app as an example to understand how this works in practice. Refer to
+      <a
+        href="https://github.com/open-telemetry/opentelemetry-operator"
+        class="hover:tw-underline text-primary"
         >OpenTelemetry operator</a
       >
       for further documentation.
@@ -188,28 +184,43 @@ endpoint.value = {
 
 const accessKey = computed(() => {
   return b64EncodeStandard(
-    `${props.currUserEmail}:${store.state.organizationData.organizationPasscode}`
+    `${props.currUserEmail}:${store.state.organizationData.organizationPasscode}`,
   );
 });
 
 const collectorCmd = computed(() => {
   return `helm --namespace openobserve-collector \\
   install o2c openobserve/openobserve-collector \\
-  --set exporters."otlphttp/openobserve".endpoint=${endpoint.value.url}/api/${props.currOrgIdentifier}/  \\
+  --set k8sCluster=cluster1  \\
+  --set exporters."otlphttp/openobserve".endpoint=${endpoint.value.url}/api/${props.currOrgIdentifier}  \\
   --set exporters."otlphttp/openobserve".headers.Authorization="Basic [BASIC_PASSCODE]"  \\
-  --set exporters."otlphttp/openobserve_k8s_events".endpoint=${endpoint.value.url}/api/${props.currOrgIdentifier}/  \\
+  --set exporters."otlphttp/openobserve_k8s_events".endpoint=${endpoint.value.url}/api/${props.currOrgIdentifier}  \\
   --set exporters."otlphttp/openobserve_k8s_events".headers.Authorization="Basic [BASIC_PASSCODE]"`;
 });
 
 const collectorCmdThisCluster = computed(() => {
   return `helm --namespace openobserve-collector \\
   install o2c openobserve/openobserve-collector \\
-  --set exporters."otlphttp/openobserve".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}/  \\
+  --set k8sCluster=cluster1  \\
+  --set exporters."otlphttp/openobserve".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}  \\
   --set exporters."otlphttp/openobserve".headers.Authorization="Basic [BASIC_PASSCODE]"  \\
-  --set exporters."otlphttp/openobserve_k8s_events".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}/  \\
+  --set exporters."otlphttp/openobserve_k8s_events".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}  \\
   --set exporters."otlphttp/openobserve_k8s_events".headers.Authorization="Basic [BASIC_PASSCODE]" \\
   --create-namespace`;
 });
+
+const crdCommand = computed(() => {
+  // Club kubectl create crd commands from template
+  return `kubectl create -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+kubectl create -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+kubectl create -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/refs/heads/main/example/prometheus-operator-crd/monitoring.coreos.com_scrapeconfigs.yaml
+kubectl create -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/refs/heads/main/example/prometheus-operator-crd/monitoring.coreos.com_probes.yaml`;
+});
+
+const helmUpdateCmd = computed(() => {
+  return `helm repo add openobserve https://charts.openobserve.ai
+helm repo update`;
+});
 </script>
 
-<style scoped></style>
+<style scoped lang="scss"></style>

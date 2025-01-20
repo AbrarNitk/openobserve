@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -103,6 +103,7 @@ import {
   PolarComponent,
   VisualMapComponent,
   DataZoomComponent,
+  MarkLineComponent,
 } from "echarts/components";
 import { LabelLayout, UniversalTransition } from "echarts/features";
 import { CanvasRenderer, SVGRenderer } from "echarts/renderers";
@@ -128,6 +129,7 @@ import type {
   PolarComponentOption,
   VisualMapComponentOption,
   DataZoomComponentOption,
+  MarkLineComponentOption,
 } from "echarts/components";
 
 type ECOption = ComposeOption<
@@ -149,6 +151,7 @@ type ECOption = ComposeOption<
   | PolarComponentOption
   | VisualMapComponentOption
   | DataZoomComponentOption
+  | MarkLineComponentOption
 >;
 
 echarts.use([
@@ -161,6 +164,7 @@ echarts.use([
   PolarComponent,
   VisualMapComponent,
   DataZoomComponent,
+  MarkLineComponent,
   BarChart,
   LineChart,
   CustomChart,
@@ -229,7 +233,7 @@ export default defineComponent({
       }
 
       // set current hovered series name in state
-      hoveredSeriesState?.value?.setHoveredSeriesName(params?.seriesName);
+      hoveredSeriesState?.value?.setHoveredSeriesName(params?.seriesName ?? "");
 
       // Below logic is to scroll legend upto current series index
       // which creates wrong legend highlight issue in tooltip
@@ -288,7 +292,7 @@ export default defineComponent({
       chart?.dispatchAction({
         type: "restore",
       });
-      // we need that toolbox datazoom button initally selected
+      // we need that toolbox datazoom button initially selected
       chart?.dispatchAction({
         type: "takeGlobalCursor",
         key: "dataZoomSelect",
@@ -312,9 +316,9 @@ export default defineComponent({
       });
 
       chart?.on("legendselectchanged", legendSelectChangedFn);
-      chart?.on("downplay", (params: any) => {
+      chart?.on("highlight", (params: any) => {
         // reset hovered series name on downplay
-        hoveredSeriesState?.value?.setHoveredSeriesName("");
+        // hoveredSeriesState?.value?.setHoveredSeriesName("");
 
         // downplay event will only called by currently hovered panel else it will go into infinite loop
         // and chart must be timeseries chart
@@ -367,9 +371,10 @@ export default defineComponent({
         emit("mouseover", params);
       });
 
+      window.removeEventListener("resize", windowResizeEventCallback);
       window.addEventListener("resize", windowResizeEventCallback);
 
-      // we need that toolbox datazoom button initally selected
+      // we need that toolbox datazoom button initially selected
       chart?.dispatchAction({
         type: "takeGlobalCursor",
         key: "dataZoomSelect",
@@ -540,7 +545,7 @@ export default defineComponent({
     onActivated(() => {
       windowResizeEventCallback();
 
-      // we need that toolbox datazoom button initally selected
+      // we need that toolbox datazoom button initially selected
       chart?.dispatchAction({
         type: "takeGlobalCursor",
         key: "dataZoomSelect",
@@ -558,7 +563,7 @@ export default defineComponent({
             chart?.setOption(props?.data?.options || {}, true);
           } catch (error) {}
 
-          // we need that toolbox datazoom button initally selected
+          // we need that toolbox datazoom button initially selected
           // for that we required to dispatch an event
           // while dispatching an event we need to pass a datazoomselectactive as true
           // this action is available in the echarts docs in list of brush actions

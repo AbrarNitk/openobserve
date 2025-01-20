@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -36,7 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
     <q-separator />
 
-    <template v-if="isFetchingIntitialRoles">
+    <template v-if="isFetchingInitialRoles">
       <div data-test="edit-role-page-loading-spinner" style="margin-top: 64px">
         <q-spinner-hourglass
           color="primary"
@@ -53,6 +53,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <GroupUsers
           data-test="edit-role-users-section"
           v-show="activeTab === 'users'"
+          :groupUsers="roleUsers"
+          :activeTab="activeTab"
+          :added-users="addedUsers"
+          :removed-users="removedUsers"
+        />
+        <GroupServiceAccounts
+          data-test="edit-role-users-section"
+          v-show="activeTab === 'serviceAccounts'"
           :groupUsers="roleUsers"
           :activeTab="activeTab"
           :added-users="addedUsers"
@@ -227,10 +235,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                       : { width: '100%' }
                   "
                 >
-                  <PermissionsJSON
+                  <query-editor
+                    data-test="logs-vrl-function-editor"
+                    editor-id="add-function-editor"
+                    class="monaco-editor q-mt-sm"
+                    language="json"
                     ref="permissionJsonEditorRef"
                     v-model:query="permissionsJsonValue"
-                    class="q-mt-sm"
                     style="height: calc(100vh - 328px)"
                   />
                 </div>
@@ -323,6 +334,7 @@ import {
 import { useQuasar } from "quasar";
 import type { AxiosPromise } from "axios";
 import streamService from "@/services/stream";
+import pipelineService from "@/services/pipelines";
 import alertService from "@/services/alerts";
 import reportService from "@/services/reports";
 import templateService from "@/services/alert_templates";
@@ -331,14 +343,16 @@ import jsTransformService from "@/services/jstransform";
 import organizationsService from "@/services/organizations";
 import savedviewsService from "@/services/saved_views";
 import dashboardService from "@/services/dashboards";
+import serviceAccountService from "@/services/service_accounts";
 import useStreams from "@/composables/useStreams";
 import { getGroups, getRoles } from "@/services/iam";
 import AppTabs from "@/components/common/AppTabs.vue";
 import GroupUsers from "../groups/GroupUsers.vue";
 import { nextTick } from "vue";
+import GroupServiceAccounts from "../groups/GroupServiceAccounts.vue";
 
-const PermissionsJSON = defineAsyncComponent(
-  () => import("@/components/iam/roles/PermissionsJSON.vue")
+const QueryEditor = defineAsyncComponent(
+  () => import("@/components/QueryEditor.vue")
 );
 
 onBeforeMount(() => {
@@ -381,7 +395,7 @@ const removedPermissions: any = ref({});
 
 const countOfVisibleResources = ref(0);
 
-const isFetchingIntitialRoles = ref(false);
+const isFetchingInitialRoles = ref(false);
 
 const filteredPermissions: Ref<{ [key: string]: Entity[] }> = ref({});
 
@@ -405,6 +419,10 @@ const tabs = [
   {
     value: "users",
     label: "Users",
+  },
+  {
+    value: "serviceAccounts",
+    label: "Service Accounts",
   },
 ];
 
@@ -447,7 +465,7 @@ const updateActiveTab = (tab: string) => {
 };
 
 const getRoleDetails = () => {
-  isFetchingIntitialRoles.value = true;
+  isFetchingInitialRoles.value = true;
 
   getResources(store.state.selectedOrganization.identifier)
     .then(async (res) => {
@@ -472,12 +490,12 @@ const getRoleDetails = () => {
       await getUsers();
       savePermissionHash();
       await updateRolePermissions(permissions.value);
-      isFetchingIntitialRoles.value = false;
+      isFetchingInitialRoles.value = false;
 
       updateTableData();
     })
     .catch(() => {
-      isFetchingIntitialRoles.value = false;
+      isFetchingInitialRoles.value = false;
     });
 };
 
@@ -713,7 +731,8 @@ const updateRolePermissions = async (permissions: Permission[]) => {
       } else if (
         resource === "logs" ||
         resource === "metrics" ||
-        resource === "traces"
+        resource === "traces" ||
+        resource === "index"
       ) {
         const streamResource = resourceMapper["stream"].entities.find(
           (e: Entity) => e.name === resource
@@ -890,7 +909,8 @@ const updateJsonInTable = () => {
       } else if (
         resource === "logs" ||
         resource === "metrics" ||
-        resource === "traces"
+        resource === "traces" ||
+        resource === "index"
       ) {
         resourceDetails = resourceMapper.value["stream"].entities.find(
           (e: Entity) => e.name === resource
@@ -935,7 +955,8 @@ const updateJsonInTable = () => {
       } else if (
         resource === "logs" ||
         resource === "metrics" ||
-        resource === "traces"
+        resource === "traces" ||
+        resource === "index"
       ) {
         resourceDetails = resourceMapper.value["stream"].entities.find(
           (e: Entity) => e.name === resource
@@ -1035,7 +1056,8 @@ const updatePermissionVisibility = (
     if (
       permission.name === "logs" ||
       permission.name === "metrics" ||
-      permission.name === "traces"
+      permission.name === "traces" ||
+      permission.name === "index"
     ) {
       updatePermissionVisibility(
         heavyResourceEntities.value[permission.name] || [],
@@ -1058,7 +1080,8 @@ const updatePermissionVisibility = (
     if (
       permission.name === "logs" ||
       permission.name === "metrics" ||
-      permission.name === "traces"
+      permission.name === "traces" ||
+      permission.name === "index"
     ) {
       filteredEntities =
         heavyResourceEntities.value[permission.name]?.filter(
@@ -1077,7 +1100,8 @@ const updatePermissionVisibility = (
       permission.show &&
       (permission.name === "logs" ||
         permission.name === "metrics" ||
-        permission.name === "traces")
+        permission.name === "traces" ||
+        permission.name === "index")
     ) {
       permission.entities =
         filter.value.permissions === "all"
@@ -1238,9 +1262,11 @@ const getResourceEntities = (resource: Resource | Entity) => {
     logs: getLogs,
     metrics: getMetrics,
     traces: getTraces,
+    index: getIndexStreams,
     alert: getAlerts,
     template: getTemplates,
     destination: getDestinations,
+    pipeline: getPipelines,
     enrichment_table: getEnrichmentTables,
     function: getFunctions,
     org: getOrgs,
@@ -1251,6 +1277,7 @@ const getResourceEntities = (resource: Resource | Entity) => {
     dashboard: getDashboards,
     metadata: getMetadataStreams,
     report: getReports,
+    service_accounts: getServiceAccounts,
   };
 
   return new Promise(async (resolve, reject) => {
@@ -1289,7 +1316,8 @@ const getDashboards = async (resource: Entity | Resource) => {
     false,
     "",
     store.state.selectedOrganization.identifier,
-    resource.name
+    resource.name,
+    ""
   );
 
   updateEntityEntities(
@@ -1422,6 +1450,18 @@ const getTemplates = async () => {
   });
 };
 
+const getPipelines = async () => {
+  const pipelines = await pipelineService.getPipelines(
+    store.state.selectedOrganization.identifier
+  );
+
+  updateResourceEntities("pipeline", ["name"], [...pipelines.data.list]);
+
+  return new Promise((resolve) => {
+    resolve(true);
+  });
+};
+
 const getAlerts = async () => {
   const alerts = await alertService.list(
     1,
@@ -1443,6 +1483,16 @@ const getLogs = async (resource: Resource | Entity) => {
   const logs: any = await getStreams("logs", false);
 
   updateEntityEntities(resource, ["name"], logs.list);
+
+  return new Promise((resolve, reject) => {
+    resolve(true);
+  });
+};
+
+const getIndexStreams = async (resource: Resource | Entity) => {
+  const indices: any = await getStreams("index", false);
+
+  updateEntityEntities(resource, ["name"], indices.list);
 
   return new Promise((resolve, reject) => {
     resolve(true);
@@ -1472,7 +1522,7 @@ const getTraces = async (resource: Resource | Entity) => {
 const getMetadataStreams = async (resource: Resource | Entity) => {
   const metadata: any = await getStreams("metadata", false);
 
-  updateEntityEntities(resource, ["name"], metadata.list);
+  updateResourceEntities("metadata", ["name"], metadata.list);
 
   return new Promise((resolve, reject) => {
     resolve(true);
@@ -1484,6 +1534,7 @@ const getStreamsTypes = async () => {
     { stream_type: "logs", name: "Logs" },
     { stream_type: "traces", name: "Traces" },
     { stream_type: "metrics", name: "Metrics" },
+    { stream_type: "index", name: "Indices" },
   ];
 
   streams.forEach((stream) => {
@@ -1508,6 +1559,18 @@ const getReports = async () => {
   );
 
   updateResourceEntities("report", ["name"], [...reports.data]);
+
+  return new Promise((resolve) => {
+    resolve(true);
+  });
+};
+
+const getServiceAccounts = async () => {
+  const accounts = await serviceAccountService.list(
+    store.state.selectedOrganization.identifier
+  );
+
+  updateResourceEntities("service_accounts", ["email"], accounts.data.data);
 
   return new Promise((resolve) => {
     resolve(true);
@@ -1614,7 +1677,8 @@ const updateEntityEntities = (
   if (
     entity.name === "logs" ||
     entity.name === "metrics" ||
-    entity.name === "traces"
+    entity.name === "traces" ||
+    entity.name === "index"
   ) {
     heavyResourceEntities.value[entity.name] = [...entities];
     if (entity.entities) entity.entities.push(...entities.slice(0, 50));
@@ -1843,7 +1907,7 @@ const saveRole = () => {
         timeout: 3000,
       });
 
-      // Reseting permissions state on save
+      // Resetting permissions state on save
 
       Object.keys(removedPermissions.value).forEach((permission) => {
         if (permissionsHash.value.has(permission))
@@ -1877,11 +1941,13 @@ const saveRole = () => {
       removedUsers.value = new Set([]);
     })
     .catch((err) => {
-      q.notify({
-        type: "negative",
-        message: `Error while updating role!`,
-        timeout: 3000,
-      });
+      if(err.response.status != 403){
+        q.notify({
+          type: "negative",
+          message: `Error while updating role!`,
+          timeout: 3000,
+        });
+      }
       console.log(err);
     });
 };

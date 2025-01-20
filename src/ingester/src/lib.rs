@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -30,10 +30,7 @@ use config::RwAHashMap;
 pub use entry::Entry;
 pub use immutable::read_from_immutable;
 use once_cell::sync::Lazy;
-use tokio::{
-    sync::{mpsc, Mutex},
-    time,
-};
+use tokio::sync::{mpsc, Mutex};
 pub use writer::{check_memtable_size, flush_all, get_writer, read_from_memtable, Writer};
 
 pub(crate) type ReadRecordBatchEntry = (Arc<Schema>, Vec<Arc<entry::RecordBatchEntry>>);
@@ -46,12 +43,16 @@ pub async fn init() -> errors::Result<()> {
     wal::check_uncompleted_parquet_files().await?;
 
     // replay wal files to create immutable
-    wal::replay_wal_files().await?;
+    tokio::task::spawn(async move {
+        if let Err(e) = wal::replay_wal_files().await {
+            log::error!("replay wal files error: {}", e);
+        }
+    });
 
     // start a job to flush memtable to immutable
     tokio::task::spawn(async move {
         loop {
-            time::sleep(time::Duration::from_secs(
+            tokio::time::sleep(tokio::time::Duration::from_secs(
                 config::get_config().limit.max_file_retention_time,
             ))
             .await;

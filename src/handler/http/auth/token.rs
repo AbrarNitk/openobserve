@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -20,7 +20,9 @@ use actix_web::{
     http::{header, Method},
 };
 #[cfg(feature = "enterprise")]
-use o2_enterprise::enterprise::{common::infra::config::O2_CONFIG, dex::service::auth::get_jwks};
+use o2_enterprise::enterprise::{
+    common::infra::config::get_config as get_o2_config, dex::service::auth::get_dex_jwks,
+};
 
 use crate::common::utils::auth::AuthExtractor;
 #[cfg(feature = "enterprise")]
@@ -38,7 +40,7 @@ pub async fn token_validator(
     use super::validator::check_permissions;
 
     let user;
-    let keys = get_jwks().await;
+    let keys = get_dex_jwks().await;
     let path = match req
         .request()
         .path()
@@ -52,8 +54,9 @@ pub async fn token_validator(
     match jwt::verify_decode_token(
         auth_info.auth.strip_prefix("Bearer").unwrap().trim(),
         &keys,
-        &O2_CONFIG.dex.client_id,
+        &get_o2_config().dex.client_id,
         false,
+        true,
     )
     .await
     {
@@ -83,29 +86,35 @@ pub async fn token_validator(
                         None => users::get_user(None, user_id).await,
                     }
                 };
-                if user.is_some() {
-                    // / Hack for prometheus, need support POST and check the header
-                    let mut req = req;
+                match user {
+                    Some(user) => {
+                        // / Hack for prometheus, need support POST and check the header
+                        let mut req = req;
 
-                    if req.method().eq(&Method::POST) && !req.headers().contains_key("content-type")
-                    {
+                        if req.method().eq(&Method::POST)
+                            && !req.headers().contains_key("content-type")
+                        {
+                            req.headers_mut().insert(
+                                header::CONTENT_TYPE,
+                                header::HeaderValue::from_static(
+                                    "application/x-www-form-urlencoded",
+                                ),
+                            );
+                        }
                         req.headers_mut().insert(
-                            header::CONTENT_TYPE,
-                            header::HeaderValue::from_static("application/x-www-form-urlencoded"),
+                            header::HeaderName::from_static("user_id"),
+                            header::HeaderValue::from_str(&res.0.user_email).unwrap(),
                         );
+                        if auth_info.bypass_check
+                            || check_permissions(user_id, auth_info, user.role, user.is_external)
+                                .await
+                        {
+                            Ok(req)
+                        } else {
+                            Err((ErrorForbidden("Unauthorized Access"), req))
+                        }
                     }
-                    req.headers_mut().insert(
-                        header::HeaderName::from_static("user_id"),
-                        header::HeaderValue::from_str(&res.0.user_email).unwrap(),
-                    );
-                    // send user role as None as it applies only to internal users
-                    if auth_info.bypass_check || check_permissions(user_id, auth_info, None).await {
-                        Ok(req)
-                    } else {
-                        Err((ErrorForbidden("Unauthorized Access"), req))
-                    }
-                } else {
-                    Err((ErrorForbidden("Unauthorized Access"), req))
+                    _ => Err((ErrorForbidden("Unauthorized Access"), req)),
                 }
             } else {
                 Err((ErrorForbidden("Unauthorized Access"), req))
@@ -117,12 +126,13 @@ pub async fn token_validator(
 
 #[cfg(feature = "enterprise")]
 pub async fn get_user_name_from_token(auth_str: &str) -> Option<String> {
-    let keys = get_jwks().await;
+    let keys = get_dex_jwks().await;
     match jwt::verify_decode_token(
         auth_str.strip_prefix("Bearer").unwrap().trim(),
         &keys,
-        &O2_CONFIG.dex.client_id,
+        &get_o2_config().dex.client_id,
         false,
+        true,
     )
     .await
     {

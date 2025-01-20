@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -18,7 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <!-- eslint-disable vue/v-on-event-hyphenation -->
 <template>
   <q-page class="logPage q-my-xs" id="logPage">
-    <div id="secondLevel" class="full-height">
+    <div v-show="!showSearchHistory" id="secondLevel" class="full-height">
       <q-splitter
         class="logs-horizontal-splitter full-height"
         v-model="splitterModel"
@@ -34,13 +34,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             @onChangeInterval="onChangeInterval"
             @onChangeTimezone="refreshTimezone"
             @handleQuickModeChange="handleQuickModeChange"
+            @handleRunQueryFn="handleRunQueryFn"
+            @on-auto-interval-trigger="onAutoIntervalTrigger"
+            @showSearchHistory="showSearchHistoryfn"
           />
         </template>
         <template v-slot:after>
           <div
             id="thirdLevel"
-            class="row scroll relative-position thirdlevel full-height overflow-hidden"
+            class="row scroll relative-position thirdlevel full-height overflow-hidden logsPageMainSection"
             style="width: 100%"
+            v-show="searchObj.meta.logsVisualizeToggle == 'logs'"
           >
             <!-- Note: Splitter max-height to be dynamically calculated with JS -->
             <q-splitter
@@ -56,7 +60,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     v-if="searchObj.meta.showFields"
                     data-test="logs-search-index-list"
                     :key="
-                      searchObj.data.stream.selectedStream.join(',') || 'default'
+                      searchObj.data.stream.selectedStream.join(',') ||
+                      'default'
                     "
                     class="full-height"
                     @setInterestingFieldInSQLQuery="
@@ -93,10 +98,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     searchObj.data.filterErrMsg !== '' &&
                     searchObj.loading == false
                   "
+                  class="q-mt-lg"
                 >
                   <h5 class="text-center">
-                    <q-icon name="warning" color="warning"
-size="10rem" /><br />
+                    <q-icon name="warning" color="warning" size="10rem" /><br />
                     <div
                       data-test="logs-search-filter-error-message"
                       v-html="searchObj.data.filterErrMsg"
@@ -107,18 +112,41 @@ size="10rem" /><br />
                   v-else-if="
                     searchObj.data.errorMsg !== '' && searchObj.loading == false
                   "
+                  class="q-ma-lg"
                 >
-                  <h5 class="text-center">
+                  <h5 class="text-center q-ma-none">
                     <div
                       data-test="logs-search-result-not-found-text"
-                      v-if="searchObj.data.errorCode == 0"
+                      v-if="
+                        searchObj.data.errorCode == 0 &&
+                        searchObj.data.errorMsg == ''
+                      "
                     >
                       Result not found.
+                      <q-btn
+                        v-if="
+                          searchObj.data.errorMsg != '' ||
+                          searchObj?.data?.functionError != ''
+                        "
+                        @click="toggleErrorDetails"
+                        size="sm"
+                        data-test="logs-page-result-error-details-btn-result-not-found"
+                        >{{ t("search.functionErrorBtnLabel") }}</q-btn
+                      >
                     </div>
-                    <SanitizedHtmlRenderer
-                      data-test="logs-search-error-message"
-                      :htmlContent="searchObj.data.errorMsg"
-                    />
+                    <div data-test="logs-search-error-message" v-else>
+                      Error occurred while retrieving search events.
+                      <q-btn
+                        v-if="
+                          searchObj.data.errorMsg != '' ||
+                          searchObj?.data?.functionError != ''
+                        "
+                        @click="toggleErrorDetails"
+                        size="sm"
+                        data-test="logs-page-result-error-details-btn"
+                        >{{ t("search.histogramErrorBtnLabel") }}</q-btn
+                      >
+                    </div>
                     <div
                       data-test="logs-search-error-20003"
                       v-if="parseInt(searchObj.data.errorCode) == 20003"
@@ -137,7 +165,6 @@ size="10rem" /><br />
                       >
                       to configure a full text search field to the stream.
                     </div>
-                    <br />
                     <q-item-label>{{
                       searchObj.data.additionalErrorMsg
                     }}</q-item-label>
@@ -148,11 +175,11 @@ size="10rem" /><br />
                     searchObj.data.stream.selectedStream.length == 0 &&
                     searchObj.loading == false
                   "
-                  class="row"
+                  class="row q-mt-lg"
                 >
                   <h6
                     data-test="logs-search-no-stream-selected-text"
-                    class="text-center col-10 q-mx-auto"
+                    class="text-center col-10 q-mx-none"
                   >
                     <q-icon name="info" color="primary" size="md" /> Select a
                     stream and press 'Run query' to continue. Additionally, you
@@ -167,14 +194,24 @@ size="10rem" /><br />
                     searchObj.loading == false &&
                     searchObj.meta.searchApplied == true
                   "
-                  class="row"
+                  class="row q-mt-lg"
                 >
                   <h6
                     data-test="logs-search-error-message"
-                    class="text-center q-mx-auto col-10"
+                    class="text-center q-ma-none col-10"
                   >
                     <q-icon name="info" color="primary" size="md" />
                     {{ t("search.noRecordFound") }}
+                    <q-btn
+                      v-if="
+                        searchObj.data.errorMsg != '' ||
+                        searchObj?.data?.functionError != ''
+                      "
+                      @click="toggleErrorDetails"
+                      size="sm"
+                      data-test="logs-page-result-error-details-btn-norecord"
+                      >{{ t("search.functionErrorBtnLabel") }}</q-btn
+                    ><br />
                   </h6>
                 </div>
                 <div
@@ -184,11 +221,11 @@ size="10rem" /><br />
                     searchObj.loading == false &&
                     searchObj.meta.searchApplied == false
                   "
-                  class="row"
+                  class="row q-mt-lg"
                 >
                   <h6
                     data-test="logs-search-error-message"
-                    class="text-center q-mx-auto col-10"
+                    class="text-center q-ma-none col-10"
                   >
                     <q-icon name="info" color="primary" size="md" />
                     {{ t("search.applySearch") }}
@@ -208,16 +245,95 @@ size="10rem" /><br />
                     @expandlog="toggleExpandLog"
                   />
                 </div>
+                <div class="text-center col-10 q-ma-none">
+                  <h5>
+                    <span v-if="disableMoreErrorDetails">
+                      <SanitizedHtmlRenderer
+                        data-test="logs-search-detail-error-message"
+                        :htmlContent="
+                          searchObj?.data?.errorMsg +
+                          '<h6 style=\'font-size: 14px; margin: 0;\'>' +
+                          searchObj?.data?.errorDetail +
+                          '</h6>'
+                        "
+                      />
+                      <SanitizedHtmlRenderer
+                        data-test="logs-search-detail-function-error-message"
+                        :htmlContent="searchObj?.data?.functionError"
+                      />
+                    </span>
+                  </h5>
+                </div>
               </template>
             </q-splitter>
           </div>
+          <div
+            v-show="searchObj.meta.logsVisualizeToggle == 'visualize'"
+            :style="`height: calc(100vh - ${splitterModel}vh - 40px);`"
+          >
+            <VisualizeLogsQuery
+              :visualizeChartData="visualizeChartData"
+              :errorData="visualizeErrorData"
+            ></VisualizeLogsQuery>
+          </div>
         </template>
       </q-splitter>
+    </div>
+    <div v-show="showSearchHistory">
+      <search-history
+        v-if="store.state.zoConfig.usage_enabled"
+        ref="searchHistoryRef"
+        @closeSearchHistory="closeSearchHistoryfn"
+        :isClicked="showSearchHistory"
+      />
+      <div v-else style="height: 200px">
+        <div style="height: 80vh" class="text-center q-pa-md flex flex-center">
+          <div>
+            <div>
+              <q-icon
+                name="history"
+                size="100px"
+                color="gray"
+                class="q-mb-md"
+                style="opacity: 0.1"
+              />
+            </div>
+            <div class="text-h4" style="opacity: 0.8">
+              Search history is not enabled.
+            </div>
+            <div
+              style="opacity: 0.8"
+              class="q-mt-sm flex items-center justify-center"
+            >
+              <q-icon
+                name="info"
+                class="q-mr-xs"
+                size="20px"
+                style="opacity: 0.5"
+              />
+              <span class="text-h6 text-center">
+                Set ZO_USAGE_REPORTING_ENABLED to true to enable usage
+                reporting.</span
+              >
+            </div>
+
+            <q-btn
+              class="q-mt-xl"
+              color="secondary"
+              unelevated
+              :label="t('search.redirect_to_logs_page')"
+              no-caps
+              @click="redirectBackToLogs"
+            />
+          </div>
+        </div>
+      </div>
     </div>
   </q-page>
 </template>
 
 <script lang="ts">
+// TODO: Remove ts-ignore from the code
 // @ts-nocheck
 import {
   defineComponent,
@@ -228,6 +344,8 @@ import {
   onBeforeMount,
   watch,
   defineAsyncComponent,
+  provide,
+  onMounted,
 } from "vue";
 import { useQuasar } from "quasar";
 import { useStore } from "vuex";
@@ -236,24 +354,40 @@ import { useI18n } from "vue-i18n";
 
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
-import { verifyOrganizationStatus } from "@/utils/zincutils";
+import {
+  verifyOrganizationStatus,
+  useLocalInterestingFields,
+} from "@/utils/zincutils";
 import MainLayoutCloudMixin from "@/enterprise/mixins/mainLayout.mixin";
 import SanitizedHtmlRenderer from "@/components/SanitizedHtmlRenderer.vue";
 import useLogs from "@/composables/useLogs";
+import VisualizeLogsQuery from "@/plugins/logs/VisualizeLogsQuery.vue";
+import useDashboardPanelData from "@/composables/useDashboardPanel";
+import { reactive } from "vue";
+import { getConsumableRelativeTime } from "@/utils/date";
+import { cloneDeep } from "lodash-es";
+import { buildSqlQuery, getFieldsFromQuery } from "@/utils/query/sqlUtils";
+import useNotifications from "@/composables/useNotifications";
+import SearchBar from "@/plugins/logs/SearchBar.vue";
+import SearchHistory from "@/plugins/logs/SearchHistory.vue";
+import { type ActivationState, PageType } from "@/ts/interfaces/logs.ts";
 
 export default defineComponent({
   name: "PageSearch",
   components: {
-    SearchBar: defineAsyncComponent(
-      () => import("@/plugins/logs/SearchBar.vue")
-    ),
+    SearchBar,
     IndexList: defineAsyncComponent(
-      () => import("@/plugins/logs/IndexList.vue")
+      () => import("@/plugins/logs/IndexList.vue"),
     ),
     SearchResult: defineAsyncComponent(
-      () => import("@/plugins/logs/SearchResult.vue")
+      () => import("@/plugins/logs/SearchResult.vue"),
+    ),
+    ConfirmDialog: defineAsyncComponent(
+      () => import("@/components/ConfirmDialog.vue"),
     ),
     SanitizedHtmlRenderer,
+    VisualizeLogsQuery,
+    SearchHistory,
   },
   mixins: [MainLayoutCloudMixin],
   methods: {
@@ -290,6 +424,12 @@ export default defineComponent({
         // this.searchObj.data.resultGrid.currentPage =
         //   this.searchObj.data.resultGrid.currentPage + 1;
         this.searchObj.loading = true;
+
+        // As page count request was getting fired on changing date records per page instead of histogram,
+        // so added this condition to avoid that
+        this.searchObj.meta.refreshHistogram = true;
+        this.searchObj.data.queryResults.aggs = null;
+
         await this.getQueryData(false);
         this.refreshHistogramChart();
 
@@ -362,12 +502,17 @@ export default defineComponent({
         }
       }
     },
+    toggleErrorDetails() {
+      this.disableMoreErrorDetails = !this.disableMoreErrorDetails;
+    },
   },
   setup() {
     const { t } = useI18n();
     const store = useStore();
     const router = useRouter();
     const $q = useQuasar();
+    const disableMoreErrorDetails: boolean = ref(false);
+    const searchHistoryRef = ref(null);
     let {
       searchObj,
       getQueryData,
@@ -383,14 +528,38 @@ export default defineComponent({
       resetSearchObj,
       resetStreamData,
       getHistogramQueryData,
+      generateHistogramSkeleton,
       fnParsedSQL,
-      addOrderByToQuery,
       getRegionInfo,
+      getStreamList,
+      getFunctions,
+      extractFields,
+      resetHistogramWithError,
+      isLimitQuery,
     } = useLogs();
     const searchResultRef = ref(null);
     const searchBarRef = ref(null);
+    const showSearchHistory = ref(false);
     let parser: any;
-    const expandedLogs = ref({});
+
+    const isLogsMounted = ref(false);
+
+    const expandedLogs = ref([]);
+    const splitterModel = ref(10);
+
+    const { showErrorNotification } = useNotifications();
+
+    provide("dashboardPanelDataPageKey", "logs");
+    const visualizeChartData = ref({});
+    const {
+      dashboardPanelData,
+      validatePanel,
+      generateLabelFromName,
+      resetDashboardPanelData,
+    } = useDashboardPanelData("logs");
+    const visualizeErrorData: any = reactive({
+      errors: [],
+    });
 
     // function restoreUrlQueryParams() {
     //   const queryParams = router.currentRoute.value.query;
@@ -429,57 +598,21 @@ export default defineComponent({
     // resetStreamData();
     // });
 
-    onActivated(async () => {
-      const queryParams: any = router.currentRoute.value.query;
-
-      const isStreamChanged =
-        queryParams.stream_type !== searchObj.data.stream.streamType ||
-        queryParams.stream !== searchObj.data.stream.selectedStream.join(",");
-
-      if (
-        isStreamChanged &&
-        queryParams.type === "stream_explorer" &&
-        searchObj.loading == false
-      ) {
-        resetSearchObj();
-        resetStreamData();
-        restoreUrlQueryParams();
-        // loadLogsData();
-        return;
-      }
-
-      if (
-        searchObj.organizationIdetifier !=
-        store.state.selectedOrganization.identifier
-      ) {
-        loadLogsData();
-      } else if (!searchObj.loading) updateStreams();
-
-      refreshHistogramChart();
+    onBeforeMount(() => {
+      handleBeforeMount();
     });
 
-    onBeforeMount(async () => {
-      await importSqlParser();
-
-      searchObj.loading = true;
-      searchObj.meta.pageType = "logs";
+    onMounted(() => {
       if (
-        config.isEnterprise == "true" &&
-        store.state.zoConfig.super_cluster_enabled
+        router.currentRoute.value.query.hasOwnProperty("action") &&
+        router.currentRoute.value.query.action == "history"
       ) {
-        await getRegionInfo();
+        showSearchHistory.value = true;
       }
+    });
 
-      resetSearchObj();
-      resetStreamData();
-      searchObj.organizationIdetifier =
-        store.state.selectedOrganization.identifier;
-      restoreUrlQueryParams();
-      loadLogsData();
-      if (config.isCloud == "true") {
-        MainLayoutCloudMixin.setup().getOrganizationThreshold(store);
-      }
-      searchObj.meta.quickMode = store.state.zoConfig.quick_mode_enabled;
+    onActivated(() => {
+      if (isLogsMounted.value) handleActivation();
     });
 
     /**
@@ -487,8 +620,10 @@ export default defineComponent({
      * This watcher is used to check if the user has changed the stream type from stream explorer to logs.
      * This gets triggered when stream explorer is active and user clicks on logs icon from left menu sidebar. Then we need to redirect the user to logs page again.
      */
+
     watch(
       () => router.currentRoute.value.query.type,
+
       (type, prev) => {
         if (
           searchObj.shouldIgnoreWatcher == false &&
@@ -499,7 +634,59 @@ export default defineComponent({
           searchObj.meta.pageType = "logs";
           loadLogsData();
         }
-      }
+      },
+    );
+    watch(
+      () => router.currentRoute.value.query,
+      () => {
+        if (!router.currentRoute.value.query.hasOwnProperty("action")) {
+          showSearchHistory.value = false;
+        }
+        if (
+          router.currentRoute.value.query.hasOwnProperty("action") &&
+          router.currentRoute.value.query.action == "history"
+        ) {
+          showSearchHistory.value = true;
+        }
+      },
+      // (action) => {
+      //   if (action === "history") {
+      //     showSearchHistory.value = true;
+      //   }
+      // }
+    );
+    watch(
+      () => router.currentRoute.value.query.type,
+      async (type) => {
+        if (type == "search_history_re_apply") {
+          searchObj.organizationIdetifier =
+            router.currentRoute.value.query.org_identifier;
+          searchObj.data.stream.selectedStream.value =
+            router.currentRoute.value.query.stream;
+          searchObj.data.stream.streamType =
+            router.currentRoute.value.query.stream_type;
+          resetSearchObj();
+
+          // As when redirecting from search history to logs page, date type was getting set as absolute, so forcefully keeping it relative.
+          searchBarRef.value.dateTimeRef.setRelativeTime(
+            router.currentRoute.value.query.period,
+          );
+          searchObj.data.datetime.type = "relative";
+
+          searchObj.data.queryResults.hits = [];
+          searchObj.meta.searchApplied = false;
+          resetStreamData();
+          restoreUrlQueryParams();
+          // loadLogsData();
+          //instead of loadLogsData so I have used all the functions that are used in that and removed getQuerydata from the list
+          //of functions of loadLogsData to stop run query whenever this gets redirecited
+          await getStreamList();
+          // await getSavedViews();
+          await getFunctions();
+          await extractFields();
+          refreshData();
+        }
+      },
     );
 
     const importSqlParser = async () => {
@@ -511,7 +698,6 @@ export default defineComponent({
     const runQueryFn = async () => {
       // searchObj.data.resultGrid.currentPage = 0;
       // searchObj.runQuery = false;
-      // expandedLogs.value = {};
       try {
         await getQueryData();
         refreshHistogramChart();
@@ -519,6 +705,179 @@ export default defineComponent({
         console.log(e);
       }
     };
+
+    // Main method for handling before mount logic
+    async function handleBeforeMount() {
+      if (isLogsTab()) {
+        await setupLogsTab();
+      } else {
+        await importSqlParser();
+      }
+    }
+
+    // Helper function to check if the current tab is "logs"
+    function isLogsTab() {
+      return searchObj.meta.logsVisualizeToggle === "logs";
+    }
+
+    // Setup logic for the logs tab
+    async function setupLogsTab() {
+      try {
+        searchObj.organizationIdentifier =
+          store.state.selectedOrganization.identifier;
+
+        searchObj.meta.pageType = "logs";
+        searchObj.meta.refreshHistogram = true;
+        searchObj.loading = true;
+
+        resetSearchObj();
+
+        resetStreamData();
+
+        restoreUrlQueryParams();
+
+        await importSqlParser();
+
+        if (isEnterpriseClusterEnabled()) {
+          await getRegionInfo();
+        }
+
+        loadLogsData();
+
+        if (isCloudEnvironment()) {
+          setupCloudSpecificThreshold();
+        }
+
+        searchObj.meta.quickMode = isQuickModeEnabled();
+
+        isLogsMounted.value = true;
+      } catch (error) {
+        console.error("Failed to setup logs tab:", error);
+        searchObj.loading = false;
+      }
+    }
+
+    // Helper function to check if the environment is enterprise and super cluster is enabled
+    function isEnterpriseClusterEnabled() {
+      return (
+        config.isEnterprise === "true" &&
+        store.state.zoConfig.super_cluster_enabled
+      );
+    }
+
+    // Helper function to check if the environment is cloud
+    function isCloudEnvironment() {
+      return config.isCloud === "true";
+    }
+
+    // Setup cloud-specific organization threshold
+    function setupCloudSpecificThreshold() {
+      MainLayoutCloudMixin.setup().getOrganizationThreshold(store);
+    }
+
+    // Helper function to check if quick mode is enabled
+    function isQuickModeEnabled() {
+      return store.state.zoConfig.quick_mode_enabled;
+    }
+
+    const handleActivation = async () => {
+      try {
+        const queryParams: any = router.currentRoute.value.query;
+
+        const activationState: ActivationState = {
+          isSearchTab: searchObj.meta.logsVisualizeToggle === PageType.LOGS,
+          isStreamExplorer: queryParams.type === PageType.STREAM_EXPLORER,
+          isTraceExplorer: queryParams.type === PageType.TRACE_EXPLORER,
+          isStreamChanged:
+            queryParams.stream_type !== searchObj.data.stream.streamType ||
+            queryParams.stream !==
+              searchObj.data.stream.selectedStream.join(","),
+        };
+
+        if (activationState.isSearchTab) {
+          await handleSearchTab(queryParams, activationState);
+        } else {
+          handleVisualizeTab();
+        }
+      } catch (err) {
+        searchObj.loading = false;
+        console.error("Activation handling failed:", {
+          error: err,
+          route: router.currentRoute.value.path,
+          queryParams: router.currentRoute.value.query,
+        });
+      }
+    };
+
+    // Helper function for handling search tab logic
+    const handleSearchTab = (queryParams, activationState: ActivationState) => {
+      try {
+        searchObj.meta.refreshHistogram = true;
+
+        if (activationState.isTraceExplorer) {
+          handleTraceExplorer(queryParams);
+          return;
+        }
+
+        if (
+          activationState.isStreamChanged &&
+          activationState.isStreamExplorer &&
+          !searchObj.loading
+        ) {
+          handleStreamExplorer();
+          return;
+        }
+
+        if (isOrganizationChanged() && !searchObj.loading) {
+          handleOrganizationChange();
+        } else if (!searchObj.loading) {
+          updateStreams();
+        }
+
+        refreshHistogramChart();
+      } catch (err) {
+        searchObj.loading = false;
+        console.error("Failed to handle search tab:", err);
+      }
+    };
+
+    // Helper function for handling the trace explorer
+    function handleTraceExplorer(queryParams) {
+      searchObj.organizationIdentifier = queryParams.org_identifier;
+      searchObj.data.stream.selectedStream.value = queryParams.stream;
+      searchObj.data.stream.streamType = queryParams.stream_type;
+      resetSearchObj();
+      resetStreamData();
+      restoreUrlQueryParams();
+      loadLogsData();
+    }
+
+    // Helper function for handling the stream explorer
+    function handleStreamExplorer() {
+      resetSearchObj();
+      resetStreamData();
+      restoreUrlQueryParams();
+      loadLogsData();
+    }
+
+    // Helper function for organization change
+    function handleOrganizationChange() {
+      searchObj.loading = true;
+      loadLogsData();
+    }
+
+    // Check if the selected organization has changed
+    function isOrganizationChanged() {
+      return (
+        searchObj.organizationIdentifier !==
+        store.state.selectedOrganization.identifier
+      );
+    }
+
+    // Helper function for handling the visualize tab
+    function handleVisualizeTab() {
+      handleRunQueryFn();
+    }
 
     const refreshTimezone = () => {
       updateGridColumns();
@@ -564,7 +923,6 @@ export default defineComponent({
           // const hasSelect =
           //   currentQuery.toLowerCase() === "select" ||
           //   currentQuery.toLowerCase().indexOf("select ") == 0;
-
           if (!hasSelect) {
             if (currentQuery != "") {
               currentQuery = currentQuery.split("|");
@@ -580,24 +938,29 @@ export default defineComponent({
               }
             }
 
-            searchObj.data.query =
-              `SELECT [FIELD_LIST]${selectFields} FROM "` +
-              searchObj.data.stream.selectedStream.join(",") +
-              `" ` +
-              whereClause;
+            searchObj.data.query = "";
+            const streams = searchObj.data.stream.selectedStream;
+
+            streams.forEach((stream: string, index: number) => {
+              // Add UNION for all but the first SELECT statement
+              if (index > 0) {
+                searchObj.data.query += " UNION ";
+              }
+              searchObj.data.query += `SELECT [FIELD_LIST]${selectFields} FROM "${stream}" ${whereClause}`;
+            });
 
             if (searchObj.data.stream.selectedStreamFields.length == 0) {
               const streamData: any = getStream(
                 searchObj.data.stream.selectedStream[0],
                 searchObj.data.stream.streamType || "logs",
-                true
+                true,
               );
               searchObj.data.stream.selectedStreamFields = streamData.schema;
             }
 
             const streamFieldNames: any =
               searchObj.data.stream.selectedStreamFields.map(
-                (item: any) => item.name
+                (item: any) => item.name,
               );
 
             for (
@@ -616,32 +979,25 @@ export default defineComponent({
               searchObj.meta.quickMode
             ) {
               searchObj.data.query = searchObj.data.query.replace(
-                "[FIELD_LIST]",
-                searchObj.data.stream.interestingFieldList.join(",")
+                /\[FIELD_LIST\]/g,
+                searchObj.data.stream.interestingFieldList.join(","),
               );
             } else {
               searchObj.data.query = searchObj.data.query.replace(
-                "[FIELD_LIST]",
-                "*"
+                /\[FIELD_LIST\]/g,
+                "*",
               );
             }
           }
 
-          searchObj.data.query = addOrderByToQuery(
-            searchObj.data.query,
-            store.state.zoConfig.timestamp_column,
-            "DESC",
-            searchObj.data.stream.selectedStream.join(",")
-          );
-
           searchObj.data.editorValue = searchObj.data.query;
 
-          searchBarRef.value.udpateQuery();
+          searchBarRef.value.updateQuery();
 
           searchObj.data.parsedQuery = parser.astify(searchObj.data.query);
         } else {
           searchObj.data.query = "";
-          searchBarRef.value.udpateQuery();
+          searchBarRef.value.updateQuery();
         }
       } catch (e) {
         console.log("Logs : Error in setQuery");
@@ -657,10 +1013,10 @@ export default defineComponent({
       return !!searchObj.data.stream.streamLists.length;
     });
 
-    const toggleExpandLog = async (index: number) => {
-      if (expandedLogs.value[index.toString()])
-        delete expandedLogs.value[index.toString()];
-      else expandedLogs.value[index.toString()] = true;
+    const toggleExpandLog = (index: number) => {
+      if (expandedLogs.value.includes(index))
+        expandedLogs.value = expandedLogs.value.filter((item) => item != index);
+      else expandedLogs.value.push(index);
     };
 
     const onSplitterUpdate = () => {
@@ -672,15 +1028,42 @@ export default defineComponent({
       refreshData();
     };
 
+    const onAutoIntervalTrigger = () => {
+      // handle event for visualization page only
+      if (searchObj.meta.logsVisualizeToggle == "visualize") {
+        handleRunQueryFn();
+      }
+    };
+    const showSearchHistoryfn = () => {
+      router.push({
+        name: "logs",
+        query: {
+          action: "history",
+          org_identifier: store.state.selectedOrganization.identifier,
+          type: "search_history",
+        },
+      });
+      showSearchHistory.value = true;
+    };
+
+    const redirectBackToLogs = () => {
+      router.push({
+        name: "logs",
+        query: {
+          org_identifier: store.state.selectedOrganization.identifier,
+        },
+      });
+    };
+
     function removeFieldByName(data, fieldName) {
-      return data.filter((item) => {
+      return data.filter((item: any) => {
         if (item.expr) {
-          if (item.expr.column === fieldName) {
-            return false;
-          }
           if (
-            item.expr.type === "aggr_func" &&
-            item.expr.args.expr.column === fieldName
+            (item.expr.type === "column_ref" &&
+              (item.expr?.column?.expr?.value === fieldName ||
+                item.expr.column === fieldName)) ||
+            (item.expr.type === "aggr_func" &&
+              item.expr?.args?.expr?.column?.value === fieldName)
           ) {
             return false;
           }
@@ -691,64 +1074,111 @@ export default defineComponent({
 
     const setInterestingFieldInSQLQuery = (
       field: any,
-      isFieldExistInSQL: boolean
+      isFieldExistInSQL: boolean,
     ) => {
       //implement setQuery function using node-sql-parser
       //isFieldExistInSQL is used to check if the field is already present in the query or not.
-      const parsedSQL = fnParsedSQL();
+      let parsedSQL = fnParsedSQL();
+      parsedSQL = processInterestingFiledInSQLQuery(
+        parsedSQL,
+        field,
+        isFieldExistInSQL,
+      );
+
+      // Modify the query based on stream name
+      const streamName = searchObj.data.stream.selectedStream[0].replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&",
+      );
+      const newQuery = parser
+        .sqlify(parsedSQL)
+        .replace(/`/g, "")
+        .replace(
+          new RegExp(`\\b${streamName}\\b`, "g"),
+          `"${searchObj.data.stream.selectedStream[0]}"`,
+        );
+
+      searchObj.data.query = newQuery;
+      searchObj.data.editorValue = newQuery;
+      searchBarRef.value.updateQuery();
+      searchObj.data.parsedQuery = parser.astify(searchObj.data.query);
+    };
+
+    const processInterestingFiledInSQLQuery = (
+      parsedSQL,
+      field,
+      isFieldExistInSQL,
+    ) => {
+      let fieldPrefix = "";
       if (parsedSQL) {
         if (isFieldExistInSQL) {
-          //remove the field from the query
-          if (parsedSQL.columns.length > 0) {
+          // Remove the field from the query
+          if (parsedSQL.columns && parsedSQL.columns.length > 0) {
             let filteredData = removeFieldByName(parsedSQL.columns, field.name);
 
             const index = searchObj.data.stream.interestingFieldList.indexOf(
-              field.name
+              field.name,
             );
             if (index > -1) {
               searchObj.data.stream.interestingFieldList.splice(index, 1);
-              field.isInterestingField = false;
             }
             parsedSQL.columns = filteredData;
           }
         } else {
-          //add the field in the query
-          if (parsedSQL.columns.length > 0) {
-            // iterate and remove the * from the query
+          if (searchObj.data.stream.selectedStream.length > 1) {
+            if (parsedSQL && parsedSQL.from.length > 1) {
+              fieldPrefix = parsedSQL.from[0].as
+                ? `${parsedSQL.from[0].as}.`
+                : `${parsedSQL.from[0].table}.`;
+            }
+          }
+          // Add the field in the query
+          if (parsedSQL.columns && parsedSQL.columns.length > 0) {
+            // Iterate and remove the * from the query
             parsedSQL.columns = removeFieldByName(parsedSQL.columns, "*");
           }
 
-          parsedSQL.columns.push({
-            expr: {
-              type: "column_ref",
-              column: field.name,
-            },
+          // check is required for union query where both streams interesting fields goes into single array
+          // but it should be added if field exist in the strem schema
+          searchObj.data.streamResults.list.forEach((stream) => {
+            if (stream.name === parsedSQL.from[0].table) {
+              stream.schema.forEach((stream_field) => {
+                if (field.name === stream_field.name) {
+                  parsedSQL.columns.push({
+                    expr: {
+                      type: "column_ref",
+                      column: fieldPrefix + field.name,
+                    },
+                    type: "expr",
+                  });
+                }
+              });
+            }
           });
         }
 
-        if (parsedSQL.columns.length == 0) {
+        // Add '*' if no columns are left
+        if (parsedSQL.columns && parsedSQL.columns.length === 0) {
           parsedSQL.columns.push({
             expr: {
               type: "column_ref",
-              column: "*",
+              column: fieldPrefix + "*",
             },
+            type: "expr",
           });
         }
-
-        const newQuery = parser
-          .sqlify(parsedSQL)
-          .replace(/`/g, "")
-          .replace(
-            searchObj.data.stream.selectedStream[0],
-            `"${searchObj.data.stream.selectedStream[0]}"`
-          );
-        searchObj.data.query = newQuery;
-        searchObj.data.editorValue = newQuery;
-
-        searchBarRef.value.udpateQuery();
-
-        searchObj.data.parsedQuery = parser.astify(searchObj.data.query);
       }
+
+      // Recursively process _next if it exists
+      if (parsedSQL._next) {
+        parsedSQL._next = processInterestingFiledInSQLQuery(
+          parsedSQL._next,
+          field,
+          isFieldExistInSQL,
+        );
+      }
+
+      return parsedSQL;
     };
 
     const handleQuickModeChange = () => {
@@ -759,16 +1189,232 @@ export default defineComponent({
         }
         if (searchObj.meta.sqlMode == true) {
           searchObj.data.query = searchObj.data.query.replace(
-            /SELECT\s+(.*?)\s+FROM/i,
+            /SELECT\s+(.*?)\s+FROM/gi,
             (match, fields) => {
               return `SELECT ${field_list} FROM`;
-            }
+            },
           );
           setQuery(searchObj.meta.quickMode);
           updateUrlQueryParams();
         }
       }
     };
+
+    //validate the data
+    const isValid = (onlyChart = false) => {
+      const errors = visualizeErrorData.errors;
+      errors.splice(0);
+      const dashboardData = dashboardPanelData;
+
+      // check if name of panel is there
+      if (!onlyChart) {
+        if (
+          dashboardData.data.title == null ||
+          dashboardData.data.title.trim() == ""
+        ) {
+          errors.push("Name of Panel is required");
+        }
+      }
+
+      // will push errors in errors array
+      validatePanel(errors);
+
+      if (errors.length) {
+        showErrorNotification(
+          "There are some errors, please fix them and try again",
+        );
+        return false;
+      }
+      return true;
+    };
+
+    watch(
+      () => [
+        searchObj.data.tempFunctionContent,
+        searchObj.meta.logsVisualizeToggle,
+      ],
+      () => {
+        if (
+          searchObj.meta.logsVisualizeToggle == "visualize" &&
+          searchObj.meta.toggleFunction &&
+          searchObj.data.tempFunctionContent
+        ) {
+          dashboardPanelData.data.queries[
+            dashboardPanelData.layout.currentQueryIndex
+          ].vrlFunctionQuery = searchObj.data.tempFunctionContent;
+        } else {
+          dashboardPanelData.data.queries[
+            dashboardPanelData.layout.currentQueryIndex
+          ].vrlFunctionQuery = "";
+        }
+      },
+    );
+
+    const setFieldsAndConditions = async () => {
+      let logsQuery = searchObj.data.query ?? "";
+
+      // if sql mode is off, then need to make query
+      if (searchObj.meta.sqlMode == false) {
+        logsQuery = buildSqlQuery(
+          searchObj.data.stream.selectedStream[0],
+          searchObj.meta.quickMode
+            ? searchObj.data.stream.interestingFieldList
+            : [],
+          logsQuery,
+        );
+      }
+
+      const { fields, filters, streamName } = await getFieldsFromQuery(
+        logsQuery ?? "",
+        store.state.zoConfig.timestamp_column ?? "_timestamp",
+      );
+
+      // set stream type and stream name
+      if (streamName && streamName != "undefined") {
+        dashboardPanelData.data.queries[0].fields.stream_type =
+          searchObj.data.stream.streamType ?? "logs";
+        dashboardPanelData.data.queries[0].fields.stream = streamName;
+      }
+
+      // set fields
+      fields.forEach((field) => {
+        field.alias = field.alias ?? field.column;
+        field.label = generateLabelFromName(field.column);
+
+        // if fields doesnt have aggregation functions, then add it in the x axis fields
+        if (
+          field.aggregationFunction === null ||
+          field.aggregationFunction == "histogram"
+        ) {
+          dashboardPanelData.data.queries[0].fields.x.push(field);
+        } else {
+          dashboardPanelData.data.queries[0].fields.y.push(field);
+        }
+      });
+
+      // if x axis fields length is 2, then add 2nd x axis field to breakdown fields
+      if (dashboardPanelData.data.queries[0].fields.x.length == 2) {
+        dashboardPanelData.data.queries[0].fields.breakdown.push(
+          dashboardPanelData.data.queries[0].fields.x[1],
+        );
+        // remove 2nd x axis field from x axis fields
+        dashboardPanelData.data.queries[0].fields.x.splice(1, 1);
+      }
+      // if x axis fields length is greater than 2, then select chart type as table
+      else if (dashboardPanelData.data.queries[0].fields.x.length > 2) {
+        dashboardPanelData.data.type = "table";
+      }
+
+      // set filters
+      dashboardPanelData.data.queries[0].fields.filter = filters;
+    };
+    const closeSearchHistoryfn = () => {
+      router.back();
+      showSearchHistory.value = false;
+      refreshHistogramChart();
+    };
+
+    // watch for changes in the visualize toggle
+    // if it is in visualize mode, then set the query and stream name in the dashboard panel
+    watch(
+      () => [searchObj.meta.logsVisualizeToggle],
+      async () => {
+        // emit resize event
+        // this will rerender/call resize method of already rendered chart to resize
+        window.dispatchEvent(new Event("resize"));
+
+        if (searchObj.meta.logsVisualizeToggle == "visualize") {
+          // reset old rendered chart
+          visualizeChartData.value = {};
+
+          // set fields and conditions
+          await setFieldsAndConditions();
+
+          // run query
+          handleRunQueryFn();
+        }
+      },
+    );
+
+    watch(
+      () => dashboardPanelData.data.type,
+      async () => {
+        // await nextTick();
+        visualizeChartData.value = JSON.parse(
+          JSON.stringify(dashboardPanelData.data),
+        );
+      },
+    );
+
+    watch(
+      () => splitterModel.value,
+      () => {
+        // rerender chart
+        window.dispatchEvent(new Event("resize"));
+      },
+    );
+
+    watch(
+      () => [
+        searchObj.data.datetime.type,
+        searchObj.data.datetime,
+        searchObj.data.datetime.relativeTimePeriod,
+      ],
+      async () => {
+        const dateTime =
+          searchObj.data.datetime.type === "relative"
+            ? getConsumableRelativeTime(
+                searchObj.data.datetime.relativeTimePeriod,
+              )
+            : cloneDeep(searchObj.data.datetime);
+
+        dashboardPanelData.meta.dateTime = {
+          start_time: new Date(dateTime.startTime),
+          end_time: new Date(dateTime.endTime),
+        };
+      },
+      { deep: true },
+    );
+
+    const handleRunQueryFn = () => {
+      if (searchObj.meta.logsVisualizeToggle == "visualize") {
+        if (!isValid(true)) {
+          return;
+        }
+
+        // refresh the date time
+        searchBarRef.value &&
+          searchBarRef.value.dateTimeRef &&
+          searchBarRef.value.dateTimeRef.refresh();
+
+        visualizeChartData.value = JSON.parse(
+          JSON.stringify(dashboardPanelData.data),
+        );
+      }
+    };
+
+    const handleChartApiError = (errorMessage: any) => {
+      const errorList = visualizeErrorData.errors;
+      errorList.splice(0);
+      errorList.push(errorMessage);
+    };
+
+    // [START] cancel running queries
+
+    //reactive object for loading state of variablesData and panels
+    const variablesAndPanelsDataLoadingState = reactive({
+      variablesData: {},
+      panels: {},
+      searchRequestTraceIds: {},
+    });
+
+    // provide variablesAndPanelsDataLoadingState to share data between components
+    provide(
+      "variablesAndPanelsDataLoadingState",
+      variablesAndPanelsDataLoadingState,
+    );
+
+    // [END] cancel running queries
 
     return {
       t,
@@ -777,7 +1423,7 @@ export default defineComponent({
       parser,
       searchObj,
       searchBarRef,
-      splitterModel: ref(10),
+      splitterModel,
       // loadPageData,
       getQueryData,
       searchResultRef,
@@ -795,13 +1441,27 @@ export default defineComponent({
       updateUrlQueryParams,
       refreshHistogramChart,
       onChangeInterval,
+      onAutoIntervalTrigger,
+      showSearchHistory,
+      showSearchHistoryfn,
+      redirectBackToLogs,
       handleRunQuery,
       refreshTimezone,
       resetSearchObj,
       resetStreamData,
       getHistogramQueryData,
+      generateHistogramSkeleton,
       setInterestingFieldInSQLQuery,
       handleQuickModeChange,
+      handleRunQueryFn,
+      visualizeChartData,
+      handleChartApiError,
+      visualizeErrorData,
+      disableMoreErrorDetails,
+      closeSearchHistoryfn,
+      resetHistogramWithError,
+      fnParsedSQL,
+      isLimitQuery,
     };
   },
   computed: {
@@ -867,25 +1527,50 @@ export default defineComponent({
         ? this.searchObj.config.lastSplitterPosition
         : 0;
     },
-    showHistogram() {
+    async showHistogram() {
+      let parsedSQL = null;
+
+      if (this.searchObj.meta.sqlMode) parsedSQL = this.fnParsedSQL();
+
       if (
         this.searchObj.meta.showHistogram &&
         !this.searchObj.shouldIgnoreWatcher
       ) {
-        setTimeout(() => {
-          if (this.searchResultRef) this.searchResultRef.reDrawChart();
-        }, 100);
+        this.searchObj.data.queryResults.aggs = [];
 
-        if (this.searchObj.meta.histogramDirtyFlag == true) {
+        if (this.searchObj.meta.sqlMode && this.isLimitQuery(parsedSQL)) {
+          this.resetHistogramWithError(
+            "Histogram is not available for limit queries.",
+          );
+        } else if (this.searchObj.data.stream.selectedStream.length > 1) {
+          this.resetHistogramWithError(
+            "Histogram is not available for multi stream search.",
+          );
+        } else if (this.searchObj.meta.histogramDirtyFlag == true) {
           this.searchObj.meta.histogramDirtyFlag = false;
           // this.handleRunQuery();
-          this.getHistogramQueryData(this.searchObj.data.histogramQuery).then(
-            (res: any) => {
+          this.searchObj.loadingHistogram = true;
+
+          await this.generateHistogramSkeleton();
+
+          this.getHistogramQueryData(this.searchObj.data.histogramQuery)
+            .then((res: any) => {
+              this.refreshTimezone();
               this.searchResultRef.reDrawChart();
-            }
-          );
+            })
+            .catch((err: any) => {
+              console.log(err, "err in updating chart");
+            })
+            .finally(() => {
+              this.searchObj.loadingHistogram = false;
+            });
+
+          setTimeout(() => {
+            if (this.searchResultRef) this.searchResultRef.reDrawChart();
+          }, 100);
         }
       }
+
       this.updateUrlQueryParams();
     },
     moveSplitter() {
@@ -962,8 +1647,6 @@ export default defineComponent({
 </script>
 
 <style lang="scss">
-$navbarHeight: 64px;
-
 .logPage {
   height: calc(100vh - $navbarHeight);
   min-height: calc(100vh - $navbarHeight) !important;
@@ -1009,11 +1692,12 @@ $navbarHeight: 64px;
     width: 100%;
   }
 
-  .q-field__control-container {
+  .logsPageMainSection > .q-field__control-container {
     padding-top: 0px !important;
   }
 
   .logs-horizontal-splitter {
+    border: 1px solid var(--q-color-grey-3);
     .q-splitter__panel {
       z-index: auto !important;
     }
@@ -1024,7 +1708,7 @@ $navbarHeight: 64px;
 
   .thirdlevel {
     .field-list-collapse-btn {
-      z-index: 9;
+      z-index: 11;
       position: absolute;
       top: 5px;
       font-size: 12px !important;

@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -19,61 +19,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     <div class="row q-my-xs">
       <div class="float-right col flex items-center">
         <syntax-guide
-          class="q-mr-lg"
+          class="q-mr-sm"
           data-test="logs-search-bar-sql-mode-toggle-btn"
           :sqlmode="searchObj.meta.sqlMode"
         />
-        <div class="flex items-center">
-          <div class="q-mr-xs text-bold">Filters:</div>
-          <app-tabs
-            style="
-              border: 1px solid #8a8a8a;
-              border-radius: 4px;
-              overflow: hidden;
-            "
-            :tabs="[
-              {
-                label: 'Basic',
-                value: 'basic',
-                style: {
-                  width: 'fit-content',
-                  padding: '0px 8px',
-                  background:
-                    searchObj.meta.filterType === 'basic' ? '#5960B2' : '',
-                  border: 'none !important',
-                  color:
-                    searchObj.meta.filterType === 'basic'
-                      ? '#ffffff !important'
-                      : '',
-                },
-              },
-              {
-                label: 'Advanced',
-                value: 'advance',
-                style: {
-                  width: 'fit-content',
-                  padding: '0px 8px',
-                  background:
-                    searchObj.meta.filterType === 'advance' ? '#5960B2' : '',
-                  border: 'none !important',
-                  color:
-                    searchObj.meta.filterType === 'advance'
-                      ? '#ffffff !important'
-                      : '',
-                },
-              },
-            ]"
-            :active-tab="searchObj.meta.filterType"
-            @update:active-tab="updateFilterType"
-          />
-        </div>
         <q-btn
-          v-if="searchObj.meta.filterType === 'basic'"
           label="Reset Filters"
           no-caps
           size="sm"
           icon="restart_alt"
-          class="q-pr-sm q-pl-xs reset-filters q-ml-md"
+          class="q-pr-sm q-pl-xs reset-filters"
           @click="resetFilters"
         />
       </div>
@@ -89,6 +44,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             }"
             :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
             data-test="logs-search-bar-date-time-dropdown"
+            :queryRangeRestrictionInHour="
+              searchObj.data.datetime.queryRangeRestrictionInHour
+            "
+            :queryRangeRestrictionMsg="
+              searchObj.data.datetime.queryRangeRestrictionMsg
+            "
             @on:date-change="updateDateTime"
             @on:timezone-change="updateTimezone"
           />
@@ -137,21 +98,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           v-model:query="searchObj.data.editorValue"
           :keywords="autoCompleteKeywords"
           v-model:functions="searchObj.data.stream.functions"
-          :read-only="searchObj.meta.filterType === 'basic'"
           @update:query="updateQueryValue"
           @run-query="searchData"
         />
       </div>
     </div>
-    <template>
-      <confirm-dialog
-        title="Change Filter Type"
-        message="Query will be wiped off and reset to default."
-        @update:ok="changeToggle()"
-        @update:cancel="showWarningDialog = false"
-        v-model="showWarningDialog"
-      />
-    </template>
   </div>
 </template>
 
@@ -164,6 +115,7 @@ import {
   nextTick,
   defineAsyncComponent,
   onBeforeUnmount,
+  onActivated,
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
@@ -185,7 +137,7 @@ export default defineComponent({
   components: {
     DateTime,
     QueryEditor: defineAsyncComponent(
-      () => import("@/components/QueryEditor.vue")
+      () => import("@/components/QueryEditor.vue"),
     ),
     SyntaxGuide,
     AppTabs,
@@ -222,8 +174,6 @@ export default defineComponent({
     const { searchObj } = useTraces();
     const queryEditorRef = ref(null);
 
-    const showWarningDialog = ref(false);
-
     let parser: any;
     let streamName = "";
     const dateTimeRef = ref(null);
@@ -247,6 +197,22 @@ export default defineComponent({
       await importSqlParser();
     });
 
+    onActivated(async () => {
+      await nextTick();
+      if (searchObj.data.datetime.type === "relative") {
+        dateTimeRef.value.setRelativeTime(
+          searchObj.data.datetime.relativeTimePeriod,
+        );
+
+        dateTimeRef.value.refresh();
+      } else {
+        dateTimeRef.value.setAbsoluteTime(
+          searchObj.data.datetime.startTime,
+          searchObj.data.datetime.endTime,
+        );
+      }
+    });
+
     const refreshTimeChange = (item) => {
       searchObj.meta.refreshInterval = item.value;
       searchObj.meta.refreshIntervalLabel = item.label;
@@ -258,7 +224,7 @@ export default defineComponent({
       (fields) => {
         if (fields.length) updateFieldKeywords(fields);
       },
-      { immediate: true, deep: true }
+      { immediate: true, deep: true },
     );
 
     const updateAutoComplete = (value) => {
@@ -296,7 +262,7 @@ export default defineComponent({
                     name: field.name,
                   });
                 });
-              }
+              },
             );
 
             if (streamFound == false) {
@@ -315,6 +281,42 @@ export default defineComponent({
     };
 
     const updateDateTime = async (value: object) => {
+      if (router.currentRoute.value.name !== "traces") return;
+      if (
+        value.valueType == "absolute" &&
+        searchObj.data.stream.selectedStream.length > 0 &&
+        searchObj.data.datetime.queryRangeRestrictionInHour > 0 &&
+        value.hasOwnProperty("selectedDate") &&
+        value.hasOwnProperty("selectedTime") &&
+        value.selectedDate.hasOwnProperty("from") &&
+        value.selectedTime.hasOwnProperty("startTime")
+      ) {
+        // Convert hours to microseconds
+        let newStartTime =
+          parseInt(value.endTime) -
+          searchObj.data.datetime.queryRangeRestrictionInHour *
+            60 *
+            60 *
+            1000000;
+
+        if (parseInt(newStartTime) > parseInt(value.startTime)) {
+          value.startTime = newStartTime;
+
+          value.selectedDate.from = timestampToTimezoneDate(
+            value.startTime / 1000,
+            store.state.timezone,
+            "yyyy/MM/DD",
+          );
+          value.selectedTime.startTime = timestampToTimezoneDate(
+            value.startTime / 1000,
+            store.state.timezone,
+            "HH:mm",
+          );
+
+          dateTimeRef.value.setAbsoluteTime(value.startTime, value.endTime);
+          dateTimeRef.value.setDateType("absolute");
+        }
+      }
       searchObj.data.datetime = {
         startTime: value.startTime,
         endTime: value.endTime,
@@ -322,6 +324,10 @@ export default defineComponent({
           ? value.relativeTimePeriod
           : searchObj.data.datetime.relativeTimePeriod,
         type: value.relativeTimePeriod ? "relative" : "absolute",
+        queryRangeRestrictionMsg:
+          searchObj.data.datetime?.queryRangeRestrictionMsg || "",
+        queryRangeRestrictionInHour:
+          searchObj.data.datetime?.queryRangeRestrictionInHour || 0,
       };
 
       await nextTick();
@@ -344,7 +350,7 @@ export default defineComponent({
       if (value.valueType === "relative") emit("searchdata");
     };
 
-    const udpateQuery = () => {
+    const updateQuery = () => {
       // alert(searchObj.data.query);
       if (queryEditorRef.value?.setValue)
         queryEditorRef.value.setValue(searchObj.data.query);
@@ -390,20 +396,6 @@ export default defineComponent({
       emit("onChangeTimezone");
     };
 
-    const updateFilterType = (value) => {
-      if (value === "basic") {
-        searchObj.meta.filterType = "basic";
-        searchObj.data.editorValue = searchObj.data.advanceFiltersQuery;
-      } else {
-        searchObj.meta.filterType = value;
-      }
-    };
-
-    const changeToggle = () => {
-      showWarningDialog.value = false;
-      searchObj.meta.filterType = "basic";
-    };
-
     const resetFilters = () => {
       searchObj.data.editorValue = "";
       searchObj.data.advanceFiltersQuery = "";
@@ -427,15 +419,12 @@ export default defineComponent({
       refreshTimeChange,
       updateQueryValue,
       updateDateTime,
-      udpateQuery,
+      updateQuery,
       downloadLogs,
       setEditorValue,
       autoCompleteKeywords,
       updateTimezone,
       dateTimeRef,
-      updateFilterType,
-      showWarningDialog,
-      changeToggle,
       resetFilters,
       shareLink,
     };
@@ -613,18 +602,18 @@ export default defineComponent({
   .download-logs-btn {
     height: 30px;
   }
-}
-</style>
 
-<style lang="scss">
-.reset-filters {
-  font-size: 22px;
+  .reset-filters {
+    font-size: 22px;
+    height: 29px;
 
-  .block {
-    font-size: 12px;
-  }
-  .q-icon {
-    margin-right: 4px;
+    :deep(.block) {
+      font-size: 12px;
+    }
+
+    :deep(.q-icon) {
+      margin-right: 4px;
+    }
   }
 }
 </style>

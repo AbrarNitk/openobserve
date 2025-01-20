@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -137,7 +137,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       <AddDestination
         :destination="editingDestination"
         :templates="templates"
-        @cancel:hideform="toggleDestionationEditor"
+        @cancel:hideform="toggleDestinationEditor"
         @get:destinations="getDestinations"
       />
     </div>
@@ -152,7 +152,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   </q-page>
 </template>
 <script lang="ts">
-import { ref, onBeforeMount, onActivated, watch, defineComponent } from "vue";
+import { ref, onBeforeMount, onActivated, watch, defineComponent, onMounted } from "vue"; 
 import type { Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQuasar, type QTableProps } from "quasar";
@@ -165,7 +165,7 @@ import { useStore } from "vuex";
 import ConfirmDialog from "../ConfirmDialog.vue";
 import { useRouter } from "vue-router";
 import QTablePagination from "@/components/shared/grid/Pagination.vue";
-import type { DestinationData } from "@/ts/interfaces";
+import type { DestinationPayload } from "@/ts/interfaces";
 import type { Template } from "@/ts/interfaces/index";
 
 import { outlinedDelete } from "@quasar/extras/material-icons-outlined";
@@ -180,7 +180,7 @@ export default defineComponent({
   setup() {
     const qTable = ref();
     const store = useStore();
-    const editingDestination: Ref<DestinationData | null> = ref(null);
+    const editingDestination: Ref<DestinationPayload | null> = ref(null);
     const { t } = useI18n();
     const q = useQuasar();
     const columns: any = ref<QTableProps["columns"]>([
@@ -220,8 +220,10 @@ export default defineComponent({
         style: "width: 110px",
       },
     ]);
-    const destinations: Ref<DestinationData[]> = ref([]);
-    const templates: Ref<Template[]> = ref([{ name: "test", body: "" }]);
+    const destinations: Ref<DestinationPayload[]> = ref([]);
+    const templates: Ref<Template[]> = ref([
+      { name: "test", body: "", type: "http" },
+    ]);
     const confirmDelete: Ref<ConformDelete> = ref({
       visible: false,
       data: null,
@@ -258,6 +260,10 @@ export default defineComponent({
       }
     );
 
+    onMounted(()=>{
+      updateRoute();
+    })
+
     const getDestinations = () => {
       const dismiss = q.notify({
         spinner: true,
@@ -279,13 +285,15 @@ export default defineComponent({
           }));
           updateRoute();
         })
-        .catch(() => {
+        .catch((err) => {
+          if(err.response.status != 403){
+            q.notify({
+              type: "negative",
+              message: "Error while pulling destinations.",
+              timeout: 2000,
+            });
+          }
           dismiss();
-          q.notify({
-            type: "negative",
-            message: "Error while pulling destinations.",
-            timeout: 2000,
-          });
         })
         .finally(() => dismiss());
     };
@@ -310,7 +318,7 @@ export default defineComponent({
       );
     };
     const editDestination = (destination: any) => {
-      toggleDestionationEditor();
+      toggleDestinationEditor();
       resetEditingDestination();
       if (!destination) {
         router.push({
@@ -342,9 +350,16 @@ export default defineComponent({
             org_identifier: store.state.selectedOrganization.identifier,
             destination_name: confirmDelete.value.data.name,
           })
-          .then(() => getDestinations())
+          .then(() => {
+            q.notify({
+              type: "positive",
+              message: `Destination ${confirmDelete.value.data.name} deleted successfully`,
+              timeout: 2000,
+            });
+            getDestinations();
+          })
           .catch((err) => {
-            if (err.response.data.code === 403) {
+            if (err.response.data.code === 409) {
               const message =
                 err.response.data?.message ||
                 err.response.data?.error ||
@@ -366,7 +381,7 @@ export default defineComponent({
       confirmDelete.value.visible = false;
       confirmDelete.value.data = null;
     };
-    const toggleDestionationEditor = () => {
+    const toggleDestinationEditor = () => {
       showDestinationEditor.value = !showDestinationEditor.value;
       if (!showDestinationEditor.value)
         router.push({
@@ -415,7 +430,7 @@ export default defineComponent({
       filterData,
       editingDestination,
       templates,
-      toggleDestionationEditor,
+      toggleDestinationEditor,
       getDestinations,
       deleteDestination,
       cancelDeleteDestination,

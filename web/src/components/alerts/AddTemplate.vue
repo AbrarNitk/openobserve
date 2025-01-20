@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -26,7 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             height: 22px;
           "
           title="Go Back"
-          @click="router.back()"
+          @click="$emit('cancel:hideform')"
         >
           <q-icon name="arrow_back_ios_new" size="14px" />
         </div>
@@ -46,11 +46,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     <q-splitter
       v-model="splitterModel"
       unit="%"
-      style="min-height: calc(100vh - 122px)"
+      style="height: calc(100vh - 106px)"
     >
       <template v-slot:before>
         <div class="row q-pa-md">
-          <div class="col-12 q-pb-md q-pt-sm">
+          <div class="col-12 q-pb-sm q-pt-sm o2-input">
             <q-input
               data-test="add-template-name-input"
               v-model="formData.name"
@@ -64,34 +64,77 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               dense
               v-bind:readonly="isUpdatingTemplate"
               v-bind:disable="isUpdatingTemplate"
+              :rules="[
+                (val: any) =>
+                  !!val
+                    ? isValidResourceName(val) ||
+                      `Characters like :, ?, /, #, and spaces are not allowed.`
+                    : t('common.nameRequired'),
+              ]"
+              tabindex="0"
+            />
+          </div>
+          <div class="col-12 q-pb-md">
+            <app-tabs
+              style="
+                border: 1px solid #8a8a8a;
+                border-radius: 4px;
+                overflow: hidden;
+                width: fit-content;
+              "
+              :tabs="tabs"
+              v-model:active-tab="formData.type"
+            />
+          </div>
+          <div v-if="formData.type === 'email'" class="col-12 q-pt-xs o2-input">
+            <q-input
+              data-test="add-template-email-title-input"
+              v-model="formData.title"
+              :label="t('alerts.title') + ' *'"
+              color="input-border"
+              bg-color="input-bg"
+              class="showLabelOnTop"
+              stack-label
+              outlined
+              filled
+              dense
               :rules="[(val: any) => !!val.trim() || 'Field is required!']"
               tabindex="0"
             />
           </div>
-          <div class="col-12 q-pb-md q-pt-xs">
+          <div class="col-12 q-pb-md">
             <div
               class="q-pb-sm text-bold"
               data-test="add-template-body-input-title"
             >
               {{ t("alert_templates.body") + " *" }}
             </div>
-            <div
-              data-test="add-template-body-input"
-              ref="editorRef"
-              id="editor"
-              :label="t('alerts.sql')"
-              stack-label
-              style="border: 1px solid #dbdbdb; border-radius: 5px"
-              class="showLabelOnTop"
-              resize
-              :rules="[(val: any) => !!val || 'Field is required!']"
-            />
+            <template v-if="formData.type === 'email'">
+              <query-editor
+                data-test="template-body-editor"
+                ref="queryEditorRef"
+                editor-id="template-body-editor"
+                class="monaco-editor q-mb-md"
+                language="markdown"
+                v-model:query="formData.body"
+              />
+            </template>
+            <template v-else>
+              <query-editor
+                data-test="template-body-editor"
+                ref="queryEditorRef"
+                editor-id="template-body-editor"
+                class="monaco-editor q-mb-md"
+                language="json"
+                v-model:query="formData.body"
+              />
+            </template>
           </div>
-          <div class="col-12 flex justify-center q-mt-lg">
+          <div class="col-12 flex justify-center">
             <q-btn
               data-test="add-template-cancel-btn"
               v-close-popup="true"
-              class="q-mb-md text-bold"
+              class="text-bold"
               :label="t('alerts.cancel')"
               text-color="light-text"
               padding="sm md"
@@ -101,7 +144,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <q-btn
               data-test="add-template-submit-btn"
               :label="t('alerts.save')"
-              class="q-mb-md text-bold no-border q-ml-md"
+              class="text-bold no-border q-ml-md"
               color="secondary"
               padding="sm xl"
               @click="saveTemplate"
@@ -122,6 +165,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <div>alert_period, alert_operator, alert_threshold</div>
             <div>alert_count, alert_agg_value</div>
             <div>alert_start_time, alert_end_time, alert_url</div>
+            <div>alert_trigger_time, alert_trigger_time_str</div>
             <div><b>rows</b> multiple lines of row template</div>
             <div><b>All of the stream fields are variables.</b></div>
             <div>{rows:N} {var:N} used to limit rows or string length.</div>
@@ -171,20 +215,20 @@ import {
   onActivated,
   defineEmits,
   watch,
+  computed,
 } from "vue";
 import type { Ref } from "vue";
 import { useI18n } from "vue-i18n";
-
-import "monaco-editor/esm/vs/editor/editor.all.js";
-import "monaco-editor/esm/vs/language/json/monaco.contribution.js";
-import "monaco-editor/esm/vs/language/json/jsonMode.js";
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 
 import templateService from "@/services/alert_templates";
 import { useStore } from "vuex";
 import { copyToClipboard, useQuasar } from "quasar";
 import type { TemplateData, Template } from "@/ts/interfaces/index";
 import { useRouter } from "vue-router";
+import { isValidResourceName } from "@/utils/zincutils";
+import AppTabs from "@/components/common/AppTabs.vue";
+import QueryEditor from "@/components/QueryEditor.vue";
+
 const props = defineProps<{ template: TemplateData | null }>();
 const emit = defineEmits(["get:templates", "cancel:hideform"]);
 const { t } = useI18n();
@@ -192,12 +236,12 @@ const splitterModel: Ref<number> = ref(75);
 const formData: Ref<Template> = ref({
   name: "",
   body: "",
+  type: "http",
+  title: "",
 });
 const store = useStore();
 const q = useQuasar();
 const editorRef: any = ref(null);
-let editorobj: any = null;
-const editorData = ref("");
 const isUpdatingTemplate = ref(false);
 const sampleTemplates = [
   {
@@ -230,67 +274,48 @@ onActivated(() => setupTemplateData());
 onBeforeMount(() => {
   setupTemplateData();
 });
-onMounted(async () => {
-  monaco.editor.defineTheme("myCustomTheme", {
-    base: "vs", // can also be vs-dark or hc-black
-    inherit: true, // can also be false to completely replace the builtin rules
-    rules: [
-      {
-        token: "comment",
-        foreground: "ffa500",
-        background: "FFFFFF",
-        fontStyle: "italic underline",
-      },
-      {
-        token: "comment.js",
-        foreground: "008800",
-        fontStyle: "bold",
-        background: "FFFFFF",
-      },
-      { token: "comment.css", foreground: "0000ff", background: "FFFFFF" }, // will inherit fontStyle from `comment` above
-    ],
-    colors: {
-      "editor.foreground": "#000000",
-      "editor.background": "#FFFFFF",
-      "editorCursor.foreground": "#000000",
-      "editor.lineHighlightBackground": "#FFFFFF",
-      "editorLineNumber.foreground": "#000000",
-      "editor.border": "#FFFFFF",
+
+const baseTabStyle = {
+  width: "fit-content",
+  padding: "4px 14px",
+  border: "none !important",
+};
+
+const tabs = computed(() => [
+  {
+    label: "Web Hook",
+    value: "http",
+    style: {
+      ...baseTabStyle,
+      background: formData.value.type === "http" ? "#5960B2" : "",
+      color: formData.value.type === "http" ? "#ffffff !important" : "",
     },
-  });
-  editorobj = monaco.editor.create(editorRef.value, {
-    value: ``,
-    language: "json",
-    minimap: {
-      enabled: false,
+  },
+  {
+    label: "Email",
+    value: "email",
+    style: {
+      ...baseTabStyle,
+      background: formData.value.type === "email" ? "#5960B2" : "#ffffff",
+      color: formData.value.type === "email" ? "#ffffff !important" : "",
     },
-    theme: store.state.theme == "dark" ? "vs-dark" : "myCustomTheme",
-    automaticLayout: true,
-    suggestOnTriggerCharacters: false,
-    wordWrap: "on",
-  });
-  editorobj.onKeyUp((e: any) => {
-    editorData.value = editorobj.getValue();
-    formData.value.body = editorobj.getValue();
-  });
-  editorobj.setValue(formData.value.body);
-});
+  },
+]);
+
 const setupTemplateData = () => {
+  const params = router.currentRoute.value.query;
   if (props.template) {
     isUpdatingTemplate.value = true;
     formData.value.name = props.template.name;
     formData.value.body = props.template.body;
+    formData.value.type = props.template.type;
+    formData.value.title = props.template.title;
+  }
+
+  if (params.type) {
+    formData.value.type = params.type as "email" | "http";
   }
 };
-
-watch(
-  () => store.state.theme,
-  () => {
-    monaco.editor.setTheme(
-      store.state.theme == "dark" ? "vs-dark" : "myCustomTheme"
-    );
-  }
-);
 
 const isTemplateBodyValid = () => {
   try {
@@ -323,7 +348,7 @@ const saveTemplate = () => {
   }
 
   // Here checking is template body json valid
-  if (!isTemplateBodyValid()) return;
+  if (formData.value.type !== "email" && !isTemplateBodyValid()) return;
 
   const dismiss = q.notify({
     spinner: true,
@@ -339,6 +364,8 @@ const saveTemplate = () => {
         data: {
           name: formData.value.name.trim(),
           body: formData.value.body,
+          type: formData.value.type,
+          title: formData.value.title,
         },
       })
       .then(() => {
@@ -351,6 +378,9 @@ const saveTemplate = () => {
         });
       })
       .catch((err) => {
+      if(err.response?.status == 403){
+          return;
+        }
         dismiss();
         q.notify({
           type: "negative",
@@ -366,6 +396,8 @@ const saveTemplate = () => {
           data: {
             name: formData.value.name.trim(),
             body: formData.value.body,
+            type: formData.value.type,
+            title: formData.value.title,
           },
         })
         .then(() => {
@@ -378,6 +410,9 @@ const saveTemplate = () => {
           });
         })
         .catch((err) => {
+          if(err.response?.status == 403){
+            return;
+          }
           dismiss();
           q.notify({
             type: "negative",
@@ -398,13 +433,13 @@ const copyTemplateBody = (text: any) => {
 };
 </script>
 <style lang="scss" scoped>
-#editor {
+.monaco-editor {
   width: 100%;
-  min-height: 310px;
+  min-height: 310px !important;
+  border-radius: 5px;
   // padding-bottom: 14px;
   resize: vertical;
   overflow: auto;
-  max-height: 350px;
 }
 
 .example-template-body {

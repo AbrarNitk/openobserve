@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,53 +13,130 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{collections::HashMap, io::Error};
-
-use actix_web::{delete, get, http, post, put, web, HttpRequest, HttpResponse};
+use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse};
+use config::meta::{alerts::alert::Alert as MetaAlert, folder::DEFAULT_FOLDER};
+use infra::db::{connect_to_orm, ORM_CLIENT};
+use svix_ksuid::Ksuid;
 
 use crate::{
-    common::{
-        meta::{alerts::Alert, http::HttpResponse as MetaHttpResponse},
-        utils::http::get_stream_type_from_request,
+    common::{meta::http::HttpResponse as MetaHttpResponse, utils::auth::UserEmail},
+    handler::http::models::alerts::{
+        requests::{
+            CreateAlertRequestBody, EnableAlertQuery, ListAlertsQuery, MoveAlertsRequestBody,
+            UpdateAlertRequestBody,
+        },
+        responses::{EnableAlertResponseBody, GetAlertResponseBody, ListAlertsResponseBody},
     },
-    service::alerts,
+    service::alerts::alert::{self, AlertError},
 };
 
+#[allow(deprecated)]
+pub mod deprecated;
 pub mod destinations;
 pub mod templates;
+
+impl From<AlertError> for HttpResponse {
+    fn from(value: AlertError) -> Self {
+        match &value {
+            AlertError::InfraError(err) => MetaHttpResponse::internal_error(err),
+            AlertError::CreateDefaultFolderError => MetaHttpResponse::internal_error(value),
+            AlertError::AlertNameMissing => MetaHttpResponse::bad_request(value),
+            AlertError::AlertNameOfgaUnsupported => MetaHttpResponse::bad_request(value),
+            AlertError::AlertNameContainsForwardSlash => MetaHttpResponse::bad_request(value),
+            AlertError::AlertDestinationMissing => MetaHttpResponse::bad_request(value),
+            AlertError::CreateAlreadyExists => MetaHttpResponse::conflict(value),
+            AlertError::CreateFolderNotFound => MetaHttpResponse::not_found(value),
+            AlertError::MoveDestinationFolderNotFound => MetaHttpResponse::not_found(value),
+            AlertError::AlertNotFound => MetaHttpResponse::not_found(value),
+            AlertError::AlertDestinationNotFound { .. } => MetaHttpResponse::not_found(value),
+            AlertError::StreamNotFound { .. } => MetaHttpResponse::not_found(value),
+            AlertError::DecodeVrl(err) => MetaHttpResponse::bad_request(err),
+            AlertError::ParseCron(err) => MetaHttpResponse::bad_request(err),
+            AlertError::RealtimeMissingCustomQuery => MetaHttpResponse::bad_request(value),
+            AlertError::SqlMissingQuery => MetaHttpResponse::bad_request(value),
+            AlertError::SqlContainsSelectStar => MetaHttpResponse::bad_request(value),
+            AlertError::PromqlMissingQuery => MetaHttpResponse::bad_request(value),
+            AlertError::SendNotificationError { .. } => MetaHttpResponse::internal_error(value),
+            AlertError::GetDestinationWithTemplateError(err) => {
+                MetaHttpResponse::internal_error(err)
+            }
+            AlertError::PeriodExceedsMaxQueryRange { .. } => MetaHttpResponse::bad_request(value),
+            AlertError::ResolveStreamNameError(_) => MetaHttpResponse::internal_error(value),
+            AlertError::PermittedAlertsMissingUser => MetaHttpResponse::forbidden(""),
+            AlertError::PermittedAlertsValidator(err) => MetaHttpResponse::forbidden(err),
+        }
+    }
+}
 
 /// CreateAlert
 #[utoipa::path(
     context_path = "/api",
     tag = "Alerts",
-    operation_id = "SaveAlert",
+    operation_id = "CreateAlert",
     security(
         ("Authorization"= [])
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
       ),
-    request_body(content = Alert, description = "Alert data", content_type = "application/json"),    
+    request_body(content = CreateAlertRequestBody, description = "Alert data", content_type = "application/json"),    
     responses(
         (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
         (status = 400, description = "Error",   content_type = "application/json", body = HttpResponse),
     )
 )]
-#[post("/{org_id}/{stream_name}/alerts")]
-pub async fn save_alert(
-    path: web::Path<(String, String)>,
-    alert: web::Json<Alert>,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name) = path.into_inner();
+#[post("/v2/{org_id}/alerts")]
+pub async fn create_alert(
+    path: web::Path<String>,
+    req_body: web::Json<CreateAlertRequestBody>,
+    user_email: UserEmail,
+) -> HttpResponse {
+    let org_id = path.into_inner();
+    let req_body = req_body.into_inner();
 
-    // Hack for frequency: convert minutes to seconds
-    let mut alert = alert.into_inner();
-    alert.trigger_condition.frequency *= 60;
+    let folder_id = req_body
+        .folder_id
+        .clone()
+        .unwrap_or(DEFAULT_FOLDER.to_string());
+    let mut alert: MetaAlert = req_body.into();
+    alert.owner = Some(user_email.user_id.clone());
+    alert.last_edited_by = Some(user_email.user_id);
 
-    match alerts::save(&org_id, &stream_name, "", alert, true).await {
-        Ok(_) => Ok(MetaHttpResponse::ok("Alert saved")),
-        Err(e) => Ok(MetaHttpResponse::bad_request(e)),
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::create(client, &org_id, &folder_id, alert).await {
+        Ok(_) => MetaHttpResponse::ok("Alert saved"),
+        Err(e) => e.into(),
+    }
+}
+
+/// GetAlert
+#[utoipa::path(
+    context_path = "/api",
+    tag = "Alerts",
+    operation_id = "GetAlert",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+        ("alert_id" = Ksuid, Path, description = "Alert ID"),
+      ),
+    responses(
+        (status = 200, description = "Success",  content_type = "application/json", body = GetAlertResponseBody),
+        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
+    )
+)]
+#[get("/v2/{org_id}/alerts/{alert_id}")]
+async fn get_alert(path: web::Path<(String, Ksuid)>) -> HttpResponse {
+    let (org_id, alert_id) = path.into_inner();
+
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::get_by_id(client, &org_id, alert_id).await {
+        Ok(alert) => {
+            let resp_body: GetAlertResponseBody = alert.into();
+            MetaHttpResponse::json(resp_body)
+        }
+        Err(e) => e.into(),
     }
 }
 
@@ -73,175 +150,30 @@ pub async fn save_alert(
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("alert_name" = String, Path, description = "Alert name"),
+        ("alert_id" = Ksuid, Path, description = "Alert ID"),
       ),
-    request_body(content = Alert, description = "Alert data", content_type = "application/json"),    
+    request_body(content = UpdateAlertRequestBody, description = "Alert data", content_type = "application/json"),    
     responses(
         (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
         (status = 400, description = "Error",   content_type = "application/json", body = HttpResponse),
     )
 )]
-#[put("/{org_id}/{stream_name}/alerts/{alert_name}")]
+#[put("/v2/{org_id}/alerts/{alert_id}")]
 pub async fn update_alert(
-    path: web::Path<(String, String, String)>,
-    alert: web::Json<Alert>,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
+    path: web::Path<(String, Ksuid)>,
+    req_body: web::Json<UpdateAlertRequestBody>,
+    user_email: UserEmail,
+) -> HttpResponse {
+    let (org_id, _alert_id) = path.into_inner();
+    let req_body = req_body.into_inner();
 
-    // Hack for frequency: convert minutes to seconds
-    let mut alert = alert.into_inner();
-    alert.trigger_condition.frequency *= 60;
-    match alerts::save(&org_id, &stream_name, &name, alert, false).await {
-        Ok(_) => Ok(MetaHttpResponse::ok("Alert Updated")),
-        Err(e) => Ok(MetaHttpResponse::bad_request(e)),
-    }
-}
+    let mut alert: MetaAlert = req_body.into();
+    alert.last_edited_by = Some(user_email.user_id);
 
-/// ListStreamAlerts
-#[utoipa::path(
-    context_path = "/api",
-    tag = "Alerts",
-    operation_id = "ListStreamAlerts",
-    security(
-        ("Authorization"= [])
-    ),
-    params(
-        ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-      ),
-    responses(
-        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description = "Error",   content_type = "application/json", body = HttpResponse),
-    )
-)]
-#[get("/{org_id}/{stream_name}/alerts")]
-async fn list_stream_alerts(
-    path: web::Path<(String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v,
-        Err(e) => {
-            return Ok(MetaHttpResponse::bad_request(e));
-        }
-    };
-    match alerts::list(&org_id, stream_type, Some(stream_name.as_str()), None).await {
-        Ok(mut data) => {
-            // Hack for frequency: convert seconds to minutes
-            for alert in data.iter_mut() {
-                alert.trigger_condition.frequency /= 60;
-            }
-
-            let mut mapdata = HashMap::new();
-            mapdata.insert("list", data);
-            Ok(MetaHttpResponse::json(mapdata))
-        }
-        Err(e) => Ok(MetaHttpResponse::bad_request(e)),
-    }
-}
-
-/// ListAlerts
-#[utoipa::path(
-    context_path = "/api",
-    tag = "Alerts",
-    operation_id = "ListAlerts",
-    security(
-        ("Authorization"= [])
-    ),
-    params(
-        ("org_id" = String, Path, description = "Organization name"),
-      ),
-    responses(
-        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
-    )
-)]
-#[get("/{org_id}/alerts")]
-async fn list_alerts(path: web::Path<String>, _req: HttpRequest) -> Result<HttpResponse, Error> {
-    let org_id = path.into_inner();
-
-    let mut _alert_list_from_rbac = None;
-    // Get List of allowed objects
-    #[cfg(feature = "enterprise")]
-    {
-        let user_id = _req.headers().get("user_id").unwrap();
-        match crate::handler::http::auth::validator::list_objects_for_user(
-            &org_id,
-            user_id.to_str().unwrap(),
-            "GET",
-            "alert",
-        )
-        .await
-        {
-            Ok(stream_list) => {
-                _alert_list_from_rbac = stream_list;
-            }
-            Err(e) => {
-                return Ok(crate::common::meta::http::HttpResponse::forbidden(
-                    e.to_string(),
-                ));
-            }
-        }
-        // Get List of allowed objects ends
-    }
-
-    match alerts::list(&org_id, None, None, _alert_list_from_rbac).await {
-        Ok(mut data) => {
-            // Hack for frequency: convert seconds to minutes
-            for alert in data.iter_mut() {
-                alert.trigger_condition.frequency /= 60;
-            }
-
-            let mut mapdata = HashMap::new();
-            mapdata.insert("list", data);
-            Ok(MetaHttpResponse::json(mapdata))
-        }
-        Err(e) => Ok(MetaHttpResponse::bad_request(e)),
-    }
-}
-
-/// GetAlertByName
-#[utoipa::path(
-    context_path = "/api",
-    tag = "Alerts",
-    operation_id = "GetAlert",
-    security(
-        ("Authorization"= [])
-    ),
-    params(
-        ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("alert_name" = String, Path, description = "Alert name"),
-      ),
-    responses(
-        (status = 200, description = "Success",  content_type = "application/json", body = Alert),
-        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
-    )
-)]
-#[get("/{org_id}/{stream_name}/alerts/{alert_name}")]
-async fn get_alert(
-    path: web::Path<(String, String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(MetaHttpResponse::bad_request(e));
-        }
-    };
-    match alerts::get(&org_id, stream_type, &stream_name, &name).await {
-        Ok(mut data) => {
-            // Hack for frequency: convert seconds to minutes
-            if let Some(ref mut data) = data {
-                data.trigger_condition.frequency /= 60;
-            }
-            Ok(MetaHttpResponse::json(data))
-        }
-        Err(e) => Ok(MetaHttpResponse::not_found(e)),
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::update(client, &org_id, None, alert).await {
+        Ok(_) => MetaHttpResponse::ok("Alert Updated"),
+        Err(e) => e.into(),
     }
 }
 
@@ -255,35 +187,64 @@ async fn get_alert(
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("alert_name" = String, Path, description = "Alert name"),
+        ("alert_id" = Ksuid, Path, description = "Alert ID"),
     ),
     responses(
         (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
-        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
         (status = 500, description = "Failure",  content_type = "application/json", body = HttpResponse),
     )
 )]
-#[delete("/{org_id}/{stream_name}/alerts/{alert_name}")]
-async fn delete_alert(
-    path: web::Path<(String, String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(MetaHttpResponse::bad_request(e));
-        }
-    };
-    match alerts::delete(&org_id, stream_type, &stream_name, &name).await {
-        Ok(_) => Ok(MetaHttpResponse::ok("Alert deleted")),
-        Err(e) => match e {
-            (http::StatusCode::NOT_FOUND, e) => Ok(MetaHttpResponse::not_found(e)),
-            (_, e) => Ok(MetaHttpResponse::internal_error(e)),
-        },
+#[delete("/v2/{org_id}/alerts/{alert_id}")]
+async fn delete_alert(path: web::Path<(String, Ksuid)>) -> HttpResponse {
+    let (org_id, alert_id) = path.into_inner();
+
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::delete_by_id(client, &org_id, alert_id).await {
+        Ok(_) => MetaHttpResponse::ok("Alert deleted"),
+        Err(e) => e.into(),
     }
+}
+
+/// ListAlerts
+#[utoipa::path(
+    context_path = "/api",
+    tag = "Alerts",
+    operation_id = "ListAlerts",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+        ListAlertsQuery,
+      ),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = ListAlertsResponseBody),
+    )
+)]
+#[get("/v2/{org_id}/alerts")]
+async fn list_alerts(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let org_id = path.into_inner();
+    let Ok(query) = web::Query::<ListAlertsQuery>::from_query(req.query_string()) else {
+        return MetaHttpResponse::bad_request("Error parsing query parameters");
+    };
+    let query = query.0;
+
+    #[cfg(not(feature = "enterprise"))]
+    let user_id = None;
+    #[cfg(feature = "enterprise")]
+    let Ok(user_id) = req.headers().get("user_id").map(|v| v.to_str()).transpose() else {
+        return MetaHttpResponse::forbidden("");
+    };
+
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let folders_and_alerts = match alert::list_v2(client, user_id, query.into(&org_id)).await {
+        Ok(f_a) => f_a,
+        Err(e) => return e.into(),
+    };
+    let Ok(resp_body) = ListAlertsResponseBody::try_from(folders_and_alerts) else {
+        return MetaHttpResponse::internal_error("");
+    };
+    MetaHttpResponse::json(resp_body)
 }
 
 /// EnableAlert
@@ -296,9 +257,8 @@ async fn delete_alert(
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("alert_name" = String, Path, description = "Alert name"),
-        ("value" = bool, Query, description = "Enable or disable alert"),
+        ("alert_id" = Ksuid, Path, description = "Alert ID"),
+        EnableAlertQuery,
     ),
     responses(
         (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
@@ -306,31 +266,23 @@ async fn delete_alert(
         (status = 500, description = "Failure",  content_type = "application/json", body = HttpResponse),
     )
 )]
-#[put("/{org_id}/{stream_name}/alerts/{alert_name}/enable")]
-async fn enable_alert(
-    path: web::Path<(String, String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(MetaHttpResponse::bad_request(e));
+#[put("/v2/{org_id}/alerts/{alert_id}/enable")]
+async fn enable_alert(path: web::Path<(String, Ksuid)>, req: HttpRequest) -> HttpResponse {
+    let (org_id, alert_id) = path.into_inner();
+    let Ok(query) = web::Query::<EnableAlertQuery>::from_query(req.query_string()) else {
+        return MetaHttpResponse::bad_request("Error parsing query parameters");
+    };
+    let should_enable = query.0.value;
+
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::enable_by_id(client, &org_id, alert_id, should_enable).await {
+        Ok(_) => {
+            let resp_body = EnableAlertResponseBody {
+                enabled: should_enable,
+            };
+            MetaHttpResponse::json(resp_body)
         }
-    };
-    let enable = match query.get("value") {
-        Some(v) => v.parse::<bool>().unwrap_or_default(),
-        None => false,
-    };
-    let mut resp = HashMap::new();
-    resp.insert("enabled".to_string(), enable);
-    match alerts::enable(&org_id, stream_type, &stream_name, &name, enable).await {
-        Ok(_) => Ok(MetaHttpResponse::json(resp)),
-        Err(e) => match e {
-            (http::StatusCode::NOT_FOUND, e) => Ok(MetaHttpResponse::not_found(e)),
-            (_, e) => Ok(MetaHttpResponse::internal_error(e)),
-        },
+        Err(e) => e.into(),
     }
 }
 
@@ -344,8 +296,7 @@ async fn enable_alert(
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
-        ("stream_name" = String, Path, description = "Stream name"),
-        ("alert_name" = String, Path, description = "Alert name"),
+        ("alert_id" = Ksuid, Path, description = "Alert ID"),
     ),
     responses(
         (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
@@ -353,24 +304,58 @@ async fn enable_alert(
         (status = 500, description = "Failure",  content_type = "application/json", body = HttpResponse),
     )
 )]
-#[put("/{org_id}/{stream_name}/alerts/{alert_name}/trigger")]
-async fn trigger_alert(
-    path: web::Path<(String, String, String)>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    let (org_id, stream_name, name) = path.into_inner();
-    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
-    let stream_type = match get_stream_type_from_request(&query) {
-        Ok(v) => v.unwrap_or_default(),
-        Err(e) => {
-            return Ok(MetaHttpResponse::bad_request(e));
+#[put("/v2/{org_id}/alerts/{alert_id}/trigger")]
+async fn trigger_alert(path: web::Path<(String, Ksuid)>) -> HttpResponse {
+    let (org_id, alert_id) = path.into_inner();
+
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::trigger_by_id(client, &org_id, alert_id).await {
+        Ok(_) => MetaHttpResponse::ok("Alert triggered"),
+        Err(e) => e.into(),
+    }
+}
+
+/// MoveAlerts
+#[utoipa::path(
+    context_path = "/api",
+    tag = "Alerts",
+    operation_id = "MoveAlerts",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    request_body(content = MoveAlertsRequestBody, description = "Identifies alerts and the destination folder", content_type = "application/json"),    
+    responses(
+        (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
+        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure",  content_type = "application/json", body = HttpResponse),
+    )
+)]
+#[put("/v2/{org_id}/alerts/move")]
+async fn move_alerts(
+    path: web::Path<String>,
+    req_body: web::Json<MoveAlertsRequestBody>,
+) -> HttpResponse {
+    let org_id = path.into_inner();
+    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    match alert::move_to_folder(
+        client,
+        &org_id,
+        &req_body.alert_ids,
+        &req_body.dst_folder_id,
+    )
+    .await
+    {
+        Ok(_) => {
+            let message = if req_body.alert_ids.len() == 1 {
+                "Alert moved"
+            } else {
+                "Alerts moved"
+            };
+            MetaHttpResponse::ok(message)
         }
-    };
-    match alerts::trigger(&org_id, stream_type, &stream_name, &name).await {
-        Ok(_) => Ok(MetaHttpResponse::ok("Alert triggered")),
-        Err(e) => match e {
-            (http::StatusCode::NOT_FOUND, e) => Ok(MetaHttpResponse::not_found(e)),
-            (_, e) => Ok(MetaHttpResponse::internal_error(e)),
-        },
+        Err(e) => e.into(),
     }
 }

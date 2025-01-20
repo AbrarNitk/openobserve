@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,29 +16,37 @@
 use std::io::Error;
 
 use actix_web::{http, http::StatusCode, HttpResponse};
+use arrow_schema::DataType;
 use config::{
     is_local_disk_storage,
-    meta::stream::{StreamSettings, StreamStats, StreamType},
-    utils::json,
+    meta::{
+        promql,
+        stream::{
+            DistinctField, StreamParams, StreamSettings, StreamStats, StreamType,
+            UpdateStreamSettings,
+        },
+    },
+    utils::{json, time::now_micros},
     SIZE_IN_MB, SQL_FULL_TEXT_SEARCH_FIELDS,
 };
 use datafusion::arrow::datatypes::Schema;
+use hashbrown::HashMap;
 use infra::{
     cache::stats,
     schema::{
-        unwrap_partition_time_level, unwrap_stream_settings, STREAM_SCHEMAS,
-        STREAM_SCHEMAS_COMPRESSED, STREAM_SCHEMAS_LATEST, STREAM_SETTINGS,
+        unwrap_partition_time_level, unwrap_stream_settings, STREAM_RECORD_ID_GENERATOR,
+        STREAM_SCHEMAS, STREAM_SCHEMAS_COMPRESSED, STREAM_SCHEMAS_LATEST, STREAM_SETTINGS,
     },
+    table::distinct_values::{check_field_use, DistinctFieldRecord, OriginType},
 };
 
 use crate::{
     common::meta::{
         authz::Authz,
         http::HttpResponse as MetaHttpResponse,
-        prom,
         stream::{Stream, StreamProperty},
     },
-    service::{db, metrics::get_prom_metadata_from_schema},
+    service::{db, db::distinct_values, metrics::get_prom_metadata_from_schema},
 };
 
 const LOCAL: &str = "disk";
@@ -77,6 +85,10 @@ pub async fn get_streams(
         .unwrap_or_default();
 
     let filtered_indices = if let Some(s_type) = stream_type {
+        let s_type = match s_type {
+            StreamType::EnrichmentTables => "enrichment_table".to_string(),
+            _ => s_type.to_string(),
+        };
         match permitted_streams {
             Some(permitted_streams) => {
                 if permitted_streams.contains(&format!("{}:_all_{}", s_type, org_id)) {
@@ -139,25 +151,22 @@ pub fn stream_res(
         })
         .collect::<Vec<_>>();
 
-    let mut stats = match stats {
-        Some(v) => v,
-        None => StreamStats::default(),
-    };
+    let mut stats = stats.unwrap_or_default();
     stats.created_at = stream_created(&schema).unwrap_or_default();
 
     let metrics_meta = if stream_type == StreamType::Metrics {
-        let mut meta = get_prom_metadata_from_schema(&schema).unwrap_or(prom::Metadata {
-            metric_type: prom::MetricType::Empty,
+        let mut meta = get_prom_metadata_from_schema(&schema).unwrap_or(promql::Metadata {
+            metric_type: promql::MetricType::Empty,
             metric_family_name: stream_name.to_string(),
             help: stream_name.to_string(),
             unit: "".to_string(),
         });
-        if meta.metric_type == prom::MetricType::Empty
+        if meta.metric_type == promql::MetricType::Empty
             && (stream_name.ends_with("_bucket")
                 || stream_name.ends_with("_sum")
                 || stream_name.ends_with("_count"))
         {
-            meta.metric_type = prom::MetricType::Counter;
+            meta.metric_type = promql::MetricType::Counter;
         }
         Some(meta)
     } else {
@@ -188,6 +197,7 @@ pub async fn save_stream_settings(
     stream_type: StreamType,
     mut settings: StreamSettings,
 ) -> Result<HttpResponse, Error> {
+    let cfg = config::get_config();
     // check if we are allowed to ingest
     if db::compact::retention::is_deleting_stream(org_id, stream_type, stream_name, None) {
         return Ok(
@@ -198,8 +208,37 @@ pub async fn save_stream_settings(
         );
     }
 
+    // only allow setting user defined schema for logs stream
+    if stream_type != StreamType::Logs
+        && settings.defined_schema_fields.is_some()
+        && !settings.defined_schema_fields.as_ref().unwrap().is_empty()
+    {
+        return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+            http::StatusCode::BAD_REQUEST.into(),
+            "only logs stream can have user defined schema".to_string(),
+        )));
+    }
+
+    // _all field can't setting for inverted index & index field
+    for key in settings.full_text_search_keys.iter() {
+        if key == &cfg.common.column_all {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                http::StatusCode::BAD_REQUEST.into(),
+                format!("field [{}] can't be used for full text search", key),
+            )));
+        }
+    }
+    for key in settings.index_fields.iter() {
+        if key == &cfg.common.column_all {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                http::StatusCode::BAD_REQUEST.into(),
+                format!("field [{}] can't be used for secondary index", key),
+            )));
+        }
+    }
+
     for key in settings.partition_keys.iter() {
-        if SQL_FULL_TEXT_SEARCH_FIELDS.contains(&key.field) {
+        if SQL_FULL_TEXT_SEARCH_FIELDS.contains(&key.field) || key.field == cfg.common.column_all {
             return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
                 http::StatusCode::BAD_REQUEST.into(),
                 format!("field [{}] can't be used for partition key", key.field),
@@ -207,11 +246,42 @@ pub async fn save_stream_settings(
         }
     }
 
+    // get schema
+    let schema = match infra::schema::get(org_id, stream_name, stream_type).await {
+        Ok(schema) => schema,
+        Err(e) => {
+            return Ok(
+                HttpResponse::InternalServerError().json(MetaHttpResponse::error(
+                    http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+                    format!("error in getting schema : {e}"),
+                )),
+            );
+        }
+    };
+    let schema_fields = schema
+        .fields()
+        .iter()
+        .map(|f| (f.name(), f))
+        .collect::<HashMap<_, _>>();
+
+    // check the full text search keys must be text field
+    for key in settings.full_text_search_keys.iter() {
+        let Some(field) = schema_fields.get(key) else {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                http::StatusCode::BAD_REQUEST.into(),
+                format!("field [{}] not found in schema", key),
+            )));
+        };
+        if field.data_type() != &DataType::Utf8 {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                http::StatusCode::BAD_REQUEST.into(),
+                format!("full text search field [{}] must be text field", key),
+            )));
+        }
+    }
+
     // we need to keep the old partition information, because the hash bucket num can't be changed
     // get old settings and then update partition_keys
-    let schema = infra::schema::get(org_id, stream_name, stream_type)
-        .await
-        .unwrap();
     let mut old_partition_keys = unwrap_stream_settings(&schema)
         .unwrap_or_default()
         .partition_keys;
@@ -235,6 +305,15 @@ pub async fn save_stream_settings(
     }
     settings.partition_keys = old_partition_keys;
 
+    for range in settings.extended_retention_days.iter() {
+        if range.start > range.end {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                http::StatusCode::BAD_REQUEST.into(),
+                "start day should be less than end day".to_string(),
+            )));
+        }
+    }
+
     let mut metadata = schema.metadata.clone();
     metadata.insert("settings".to_string(), json::to_string(&settings).unwrap());
     if !metadata.contains_key("created_at") {
@@ -251,6 +330,214 @@ pub async fn save_stream_settings(
         http::StatusCode::OK.into(),
         "".to_string(),
     )))
+}
+
+#[tracing::instrument(skip(new_settings))]
+pub async fn update_stream_settings(
+    org_id: &str,
+    stream_name: &str,
+    stream_type: StreamType,
+    new_settings: UpdateStreamSettings,
+) -> Result<HttpResponse, Error> {
+    let cfg = config::get_config();
+    match infra::schema::get_settings(org_id, stream_name, stream_type).await {
+        Some(mut settings) => {
+            if let Some(max_query_range) = new_settings.max_query_range {
+                settings.max_query_range = max_query_range;
+            }
+            if let Some(store_original_data) = new_settings.store_original_data {
+                settings.store_original_data = store_original_data;
+            }
+            if let Some(approx_partition) = new_settings.approx_partition {
+                settings.approx_partition = approx_partition;
+            }
+
+            if let Some(flatten_level) = new_settings.flatten_level {
+                settings.flatten_level = Some(flatten_level);
+            }
+
+            if let Some(data_retention) = new_settings.data_retention {
+                settings.data_retention = data_retention;
+            }
+
+            // check for user defined schema
+            if !new_settings.defined_schema_fields.add.is_empty() {
+                settings.defined_schema_fields =
+                    if let Some(mut schema_fields) = settings.defined_schema_fields {
+                        schema_fields.extend(new_settings.defined_schema_fields.add);
+                        Some(schema_fields)
+                    } else {
+                        Some(new_settings.defined_schema_fields.add)
+                    }
+            }
+            if !new_settings.defined_schema_fields.remove.is_empty() {
+                if let Some(schema_fields) = settings.defined_schema_fields.as_mut() {
+                    schema_fields
+                        .retain(|field| !new_settings.defined_schema_fields.remove.contains(field));
+                }
+            }
+            if let Some(schema_fields) = settings.defined_schema_fields.as_ref() {
+                if schema_fields.len() > cfg.limit.user_defined_schema_max_fields {
+                    return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                        http::StatusCode::BAD_REQUEST.into(),
+                        format!(
+                            "user defined schema fields count exceeds the limit: {}",
+                            cfg.limit.user_defined_schema_max_fields
+                        ),
+                    )));
+                }
+            }
+
+            // check for bloom filter fields
+            if !new_settings.bloom_filter_fields.add.is_empty() {
+                settings
+                    .bloom_filter_fields
+                    .extend(new_settings.bloom_filter_fields.add);
+            }
+            if !new_settings.bloom_filter_fields.remove.is_empty() {
+                settings
+                    .bloom_filter_fields
+                    .retain(|field| !new_settings.bloom_filter_fields.remove.contains(field));
+            }
+
+            // check for index fields
+            if !new_settings.index_fields.add.is_empty() {
+                settings.index_fields.extend(new_settings.index_fields.add);
+                settings.index_updated_at = now_micros();
+            }
+            if !new_settings.index_fields.remove.is_empty() {
+                settings
+                    .index_fields
+                    .retain(|field| !new_settings.index_fields.remove.contains(field));
+            }
+
+            if !new_settings.extended_retention_days.add.is_empty() {
+                settings
+                    .extended_retention_days
+                    .extend(new_settings.extended_retention_days.add);
+            }
+
+            if !new_settings.extended_retention_days.remove.is_empty() {
+                settings
+                    .extended_retention_days
+                    .retain(|range| !new_settings.extended_retention_days.remove.contains(range));
+            }
+
+            if !new_settings.distinct_value_fields.add.is_empty() {
+                for f in &new_settings.distinct_value_fields.add {
+                    // we ignore full text search fields
+                    if settings.full_text_search_keys.contains(f)
+                        || new_settings.full_text_search_keys.add.contains(f)
+                    {
+                        continue;
+                    }
+                    let record = DistinctFieldRecord::new(
+                        OriginType::Stream,
+                        stream_name,
+                        org_id,
+                        stream_name,
+                        stream_type.to_string(),
+                        f,
+                    );
+                    if let Err(e) = distinct_values::add(record).await {
+                        return Ok(HttpResponse::InternalServerError().json(
+                            MetaHttpResponse::error(
+                                http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+                                format!("error in updating settings : {e}"),
+                            ),
+                        ));
+                    }
+                    // we cannot allow duplicate entries here
+                    let temp = DistinctField {
+                        name: f.to_owned(),
+                        added_ts: chrono::Utc::now().timestamp_micros(),
+                    };
+                    if !settings.distinct_value_fields.contains(&temp) {
+                        settings.distinct_value_fields.push(temp);
+                    }
+                }
+            }
+
+            if !new_settings.distinct_value_fields.remove.is_empty() {
+                for f in &new_settings.distinct_value_fields.remove {
+                    let usage =
+                        match check_field_use(org_id, stream_name, stream_type.as_str(), f).await {
+                            Ok(entry) => entry,
+                            Err(e) => {
+                                return Ok(HttpResponse::InternalServerError().json(
+                                    MetaHttpResponse::error(
+                                        http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+                                        format!("error in updating settings : {e}"),
+                                    ),
+                                ));
+                            }
+                        };
+                    // if there are multiple uses, we cannot allow it to be removed
+                    if usage.len() > 1 {
+                        return Ok(HttpResponse::BadRequest().json(
+                            MetaHttpResponse::error(
+                                http::StatusCode::BAD_REQUEST.into(),
+                                format!("error in removing distinct field : field {f} if used in dashboards/reports"),
+                            ),
+                        ));
+                    }
+                    // here we can be sure that usage is at most 1 record
+                    if let Some(entry) = usage.first() {
+                        if entry.origin != OriginType::Stream {
+                            return Ok(HttpResponse::BadRequest().json(
+                                MetaHttpResponse::error(
+                                    http::StatusCode::BAD_REQUEST.into(),
+                                    format!("error in removing distinct field : field {f} if used in dashboards/reports"),
+                                ),
+                            ));
+                        }
+                    }
+                }
+                // here we are sure that all fields to be removed can be removed,
+                // so we bulk filter
+                settings.distinct_value_fields.retain(|field| {
+                    !new_settings
+                        .distinct_value_fields
+                        .remove
+                        .contains(&field.name)
+                });
+            }
+
+            if !new_settings.full_text_search_keys.add.is_empty() {
+                settings
+                    .full_text_search_keys
+                    .extend(new_settings.full_text_search_keys.add);
+                settings.index_updated_at = now_micros();
+            }
+
+            if !new_settings.full_text_search_keys.remove.is_empty() {
+                settings
+                    .full_text_search_keys
+                    .retain(|field| !new_settings.full_text_search_keys.remove.contains(field));
+            }
+
+            if !new_settings.partition_keys.add.is_empty() {
+                settings
+                    .partition_keys
+                    .extend(new_settings.partition_keys.add);
+            }
+
+            if !new_settings.partition_keys.remove.is_empty() {
+                settings
+                    .partition_keys
+                    .retain(|field| !new_settings.partition_keys.remove.contains(field));
+            }
+
+            if let Some(partition_time_level) = new_settings.partition_time_level {
+                settings.partition_time_level = Some(partition_time_level);
+            }
+            save_stream_settings(org_id, stream_name, stream_type, settings).await
+        }
+        None => Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+            http::StatusCode::BAD_REQUEST.into(),
+            "stream settings could not be found".to_string(),
+        ))),
+    }
 }
 
 #[tracing::instrument]
@@ -308,6 +595,11 @@ pub async fn delete_stream(
     w.remove(&key);
     drop(w);
 
+    // delete stream record id generator cache
+    {
+        STREAM_RECORD_ID_GENERATOR.remove(&key);
+    }
+
     // delete stream stats cache
     stats::remove_stream_stats(org_id, stream_name, stream_type);
 
@@ -320,6 +612,23 @@ pub async fn delete_stream(
             )),
         );
     };
+
+    // delete associated pipelines
+    if let Some(pipeline) =
+        db::pipeline::get_by_stream(&StreamParams::new(org_id, stream_name, stream_type)).await
+    {
+        if let Err(e) = db::pipeline::delete(&pipeline.id).await {
+            return Ok(
+                HttpResponse::InternalServerError().json(MetaHttpResponse::error(
+                    StatusCode::INTERNAL_SERVER_ERROR.into(),
+                    format!(
+                        "Stream deletion fail: failed to delete the associated pipeline {}: {e}",
+                        pipeline.name
+                    ),
+                )),
+            );
+        }
+    }
 
     crate::common::utils::auth::remove_ownership(
         org_id,
@@ -337,8 +646,7 @@ pub async fn delete_stream(
 fn transform_stats(stats: &mut StreamStats) {
     stats.storage_size /= SIZE_IN_MB;
     stats.compressed_size /= SIZE_IN_MB;
-    stats.storage_size = (stats.storage_size * 100.0).round() / 100.0;
-    stats.compressed_size = (stats.compressed_size * 100.0).round() / 100.0;
+    stats.index_size /= SIZE_IN_MB;
 }
 
 pub fn stream_created(schema: &Schema) -> Option<i64> {
@@ -354,11 +662,6 @@ pub async fn delete_fields(
     stream_type: Option<StreamType>,
     fields: &[String],
 ) -> Result<(), anyhow::Error> {
-    if !config::get_config().common.widening_schema_evolution {
-        return Err(anyhow::anyhow!(
-            "widening schema evolution is disabled, can't delete fields"
-        ));
-    }
     if fields.is_empty() {
         return Ok(());
     }
@@ -382,7 +685,7 @@ mod tests {
     fn test_stream_res() {
         let stats = StreamStats::default();
         let schema = Schema::new(vec![Field::new("f.c", DataType::Int32, false)]);
-        let res = stream_res("Test", StreamType::Logs, schema, Some(stats));
+        let res = stream_res("Test", StreamType::Logs, schema, Some(stats.clone()));
         assert_eq!(res.stats, stats);
     }
 }

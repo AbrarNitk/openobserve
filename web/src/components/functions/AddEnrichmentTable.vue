@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -173,12 +173,14 @@ export default defineComponent({
         })
         .catch((err) => {
           compilationErr.value = err.response.data["message"];
-          q.notify({
+          if(err.response.status != 403){
+            q.notify({
             type: "negative",
             message:
               JSON.stringify(err.response.data["error"]) ||
               "Enrichment Table creation failed",
           });
+          }
           dismiss();
         });
 

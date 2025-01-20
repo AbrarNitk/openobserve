@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -67,7 +67,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         v-model="sortedStreamFields"
         :visible-columns="['name']"
         :rows="streamFieldsRows"
-        :row-key="(row) => searchObj.data.stream.selectedStream[0] + row.name"
+        :row-key="
+          (row: any) => searchObj.data.stream.selectedStream[0] + row.name
+        "
         :filter="searchObj.data.stream.filterField"
         :filter-method="filterFieldFn"
         v-model:pagination="pagination"
@@ -95,8 +97,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             class="cursor-pointer text-bold"
           >
             <q-td
-              class="field_list bg-grey-3"
+              class="field_list"
               style="line-height: 28px; padding-left: 10px"
+              :class="
+                store.state.theme === 'dark' ? 'text-grey-5' : 'bg-grey-3'
+              "
             >
               {{ props.row.name }} ({{
                 searchObj.data.stream.expandGroupRowsFieldCount[
@@ -133,7 +138,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   : ''
               "
             >
-              <!-- TODO OK : Repeated code make seperate component to display field  -->
+              <!-- TODO OK : Repeated code make separate component to display field  -->
               <div
                 v-if="
                   props.row.ftsKey ||
@@ -175,7 +180,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 </div>
                 <div class="field_overlay">
                   <q-btn
-                    v-if="props.row.isSchemaField"
+                    v-if="
+                      props.row.isSchemaField &&
+                      props.row.name != store.state.zoConfig.timestamp_column
+                    "
                     :icon="outlinedAdd"
                     :data-test="`log-search-index-list-filter-${props.row.name}-field-btn`"
                     style="margin-right: 0.375rem"
@@ -188,7 +196,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     :data-test="`log-search-index-list-add-${props.row.name}-field-btn`"
                     v-if="
                       !searchObj.data.stream.selectedFields.includes(
-                        props.row.name
+                        props.row.name,
                       )
                     "
                     :name="outlinedVisibility"
@@ -201,7 +209,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     :data-test="`log-search-index-list-remove-${props.row.name}-field-btn`"
                     v-if="
                       searchObj.data.stream.selectedFields.includes(
-                        props.row.name
+                        props.row.name,
                       )
                     "
                     :name="outlinedVisibilityOff"
@@ -225,7 +233,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     @click.stop="
                       addToInterestingFieldList(
                         props.row,
-                        props.row.isInterestingField
+                        props.row.isInterestingField,
                       )
                     "
                   />
@@ -243,7 +251,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 expanded-icon="
                   expand_less
                 "
-                @before-show="(event: any) => openFilterCreator(event, props.row)"
+                @before-show="
+                  (event: any) => openFilterCreator(event, props.row)
+                "
               >
                 <template v-slot:header>
                   <div
@@ -298,7 +308,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                         :data-test="`log-search-index-list-add-${props.row.name}-field-btn`"
                         v-if="
                           !searchObj.data.stream.selectedFields.includes(
-                            props.row.name
+                            props.row.name,
                           )
                         "
                         :name="outlinedVisibility"
@@ -311,7 +321,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                         :data-test="`log-search-index-list-remove-${props.row.name}-field-btn`"
                         v-if="
                           searchObj.data.stream.selectedFields.includes(
-                            props.row.name
+                            props.row.name,
                           )
                         "
                         :name="outlinedVisibilityOff"
@@ -335,7 +345,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                         @click.stop="
                           addToInterestingFieldList(
                             props.row,
-                            props.row.isInterestingField
+                            props.row.isInterestingField,
                           )
                         "
                       />
@@ -427,7 +437,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                                 size="6px"
                                 @click="
                                   addSearchTerm(
-                                    `${props.row.name}='${value.key}'`
+                                    props.row.name,
+                                    value.key,
+                                    'include',
                                   )
                                 "
                                 title="Include Term"
@@ -442,7 +454,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                                 size="6px"
                                 @click="
                                   addSearchTerm(
-                                    `${props.row.name}!='${value.key}'`
+                                    props.row.name,
+                                    value.key,
+                                    'exclude',
                                   )
                                 "
                                 title="Exclude Term"
@@ -481,7 +495,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             </template>
           </q-input>
           <q-tr v-if="searchObj.loadingStream == true">
-            <q-td colspan="100%" class="text-bold" style="opacity: 0.7">
+            <q-td colspan="100%"
+class="text-bold" style="opacity: 0.7">
               <div class="text-subtitle2 text-weight-bold">
                 <q-spinner-hourglass size="20px" />
                 {{ t("confirmDialog.loading") }}
@@ -510,35 +525,39 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               :options="userDefinedSchemaBtnGroupOption"
             >
               <template v-slot:user_defined_slot>
-                <q-icon name="person"></q-icon>
-                <q-icon name="schema"></q-icon>
-                <q-tooltip
-                  data-test="logs-page-fields-list-user-defined-fields-warning-tooltip"
-                  anchor="center right"
-                  self="center left"
-                  max-width="300px"
-                  class="text-body2"
-                >
-                  <span class="text-bold" color="white">{{
-                    t("search.userDefinedSchemaLabel")
-                  }}</span>
-                </q-tooltip>
+                <div data-test="logs-user-defined-fields-btn">
+                  <q-icon name="person"></q-icon>
+                  <q-icon name="schema"></q-icon>
+                  <q-tooltip
+                    data-test="logs-page-fields-list-user-defined-fields-warning-tooltip"
+                    anchor="center right"
+                    self="center left"
+                    max-width="300px"
+                    class="text-body2"
+                  >
+                    <span class="text-bold" color="white">{{
+                      t("search.userDefinedSchemaLabel")
+                    }}</span>
+                  </q-tooltip>
+                </div>
               </template>
               <template v-slot:all_fields_slot>
-                <q-icon name="schema"></q-icon>
-                <q-tooltip
-                  data-test="logs-page-fields-list-all-fields-warning-tooltip"
-                  anchor="center right"
-                  self="center left"
-                  max-width="300px"
-                  class="text-body2"
-                >
-                  <span class="text-bold" color="white">{{
-                    t("search.allFieldsLabel")
-                  }}</span>
-                  <q-separator color="white" class="q-mt-xs q-mb-xs" />
-                  {{ t("search.allFieldsWarningMsg") }}
-                </q-tooltip>
+                <div data-test="logs-all-fields-btn">
+                  <q-icon name="schema"></q-icon>
+                  <q-tooltip
+                    data-test="logs-page-fields-list-all-fields-warning-tooltip"
+                    anchor="center right"
+                    self="center left"
+                    max-width="300px"
+                    class="text-body2"
+                  >
+                    <span class="text-bold" color="white">{{
+                      t("search.allFieldsLabel")
+                    }}</span>
+                    <q-separator color="white" class="q-mt-xs q-mb-xs" />
+                    {{ t("search.allFieldsWarningMsg") }}
+                  </q-tooltip>
+                </div>
               </template>
             </q-btn-toggle>
           </div>
@@ -583,7 +602,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
             <q-btn
               round
-              data-test="logs-page-fields-list-pagination-messsage-button"
+              data-test="logs-page-fields-list-pagination-message-button"
               dense
               flat
               class="text text-caption text-regular"
@@ -662,9 +681,6 @@ export default defineComponent({
   emits: ["setInterestingFieldInSQLQuery"],
   methods: {
     handleMultiStreamSelection() {
-      if (this.searchObj.meta.sqlMode) {
-        this.searchObj.meta.sqlMode = false;
-      }
       this.onStreamChange("");
     },
     handleSingleStreamSelect(opt: any) {
@@ -685,6 +701,9 @@ export default defineComponent({
       filterHitsColumns,
       extractFields,
       validateFilterForMultiStream,
+      reorderSelectedFields,
+      getFilterExpressionByFieldType,
+      extractValueQuery,
     } = useLogs();
     const userDefinedSchemaBtnGroupOption = [
       {
@@ -718,7 +737,7 @@ export default defineComponent({
         streamOptions.value = searchObj.data.stream.streamLists;
         const needle = val.toLowerCase();
         streamOptions.value = streamOptions.value.filter(
-          (v: any) => v.label.toLowerCase().indexOf(needle) > -1
+          (v: any) => v.label.toLowerCase().indexOf(needle) > -1,
         );
       });
     };
@@ -770,79 +789,85 @@ export default defineComponent({
     };
 
     function clickFieldFn(row: { name: never }, pageIndex: number) {
-      if (searchObj.data.stream.selectedFields.includes(row.name)) {
-        searchObj.data.stream.selectedFields =
-          searchObj.data.stream.selectedFields.filter(
-            (v: any) => v !== row.name
-          );
+      let selectedFields = reorderSelectedFields();
+
+      if (selectedFields.includes(row.name)) {
+        selectedFields = selectedFields.filter((v: any) => v !== row.name);
       } else {
-        searchObj.data.stream.selectedFields.push(row.name);
+        selectedFields.push(row.name);
       }
-      searchObj.organizationIdetifier =
+
+      searchObj.data.stream.selectedFields = selectedFields;
+
+      searchObj.organizationIdentifier =
         store.state.selectedOrganization.identifier;
       updatedLocalLogFilterField();
       filterHitsColumns();
     }
 
-    const openFilterCreator = (
+    const openFilterCreator = async (
       event: any,
-      { name, ftsKey, isSchemaField, streams }: any
+      { name, ftsKey, isSchemaField, streams }: any,
     ) => {
       if (ftsKey) {
         event.stopPropagation();
         event.preventDefault();
         return;
       }
-
-      let timestamps: any =
-        searchObj.data.datetime.type === "relative"
-          ? getConsumableRelativeTime(
-              searchObj.data.datetime.relativeTimePeriod
-            )
-          : cloneDeep(searchObj.data.datetime);
-
-      if (searchObj.data.stream.streamType === "enrichment_tables") {
-        const stream = searchObj.data.streamResults.list.find((stream: any) =>
-          searchObj.data.stream.selectedStream.includes(stream.name)
-        );
-        if (stream.stats) {
-          timestamps = {
-            startTime:
-              new Date(
-                convertTimeFromMicroToMilli(
-                  stream.stats.doc_time_min - 300000000
-                )
-              ).getTime() * 1000,
-            endTime:
-              new Date(
-                convertTimeFromMicroToMilli(
-                  stream.stats.doc_time_max + 300000000
-                )
-              ).getTime() * 1000,
-          };
-        }
-      }
-
-      const startISOTimestamp: number = timestamps?.startTime || 0;
-      const endISOTimestamp: number = timestamps?.endTime || 0;
-
-      fieldValues.value[name] = {
-        isLoading: true,
-        values: [],
-        errMsg: "",
-      };
       try {
+        let timestamps: any =
+          searchObj.data.datetime.type === "relative"
+            ? getConsumableRelativeTime(
+                searchObj.data.datetime.relativeTimePeriod,
+              )
+            : cloneDeep(searchObj.data.datetime);
+
+        if (searchObj.data.stream.streamType === "enrichment_tables") {
+          const stream = searchObj.data.streamResults.list.find((stream: any) =>
+            searchObj.data.stream.selectedStream.includes(stream.name),
+          );
+          if (stream.stats) {
+            timestamps = {
+              startTime:
+                new Date(
+                  convertTimeFromMicroToMilli(
+                    stream.stats.doc_time_min - 300000000,
+                  ),
+                ).getTime() * 1000,
+              endTime:
+                new Date(
+                  convertTimeFromMicroToMilli(
+                    stream.stats.doc_time_max + 300000000,
+                  ),
+                ).getTime() * 1000,
+            };
+          }
+        }
+
+        const startISOTimestamp: number = timestamps?.startTime || 0;
+        const endISOTimestamp: number = timestamps?.endTime || 0;
+
+        fieldValues.value[name] = {
+          isLoading: true,
+          values: [],
+          errMsg: "",
+        };
         let query_context = "";
         let query = searchObj.data.query;
         let whereClause = "";
+        let queries: any = {};
         searchObj.data.filterErrMsg = "";
         searchObj.data.missingStreamMessage = "";
         searchObj.data.stream.missingStreamMultiStreamFilter = [];
-        if (searchObj.meta.sqlMode && query.trim().length) {
+        if (searchObj.meta.sqlMode == true && query.trim().length) {
           const parsedSQL: any = parser.astify(query);
           //hack add time stamp column to parsedSQL if not already added
           query_context = parser.sqlify(parsedSQL).replace(/`/g, '"') || "";
-        } else if (query.trim().length) {
+
+          if (searchObj.data.stream.selectedStream.length > 1) {
+            queries = extractValueQuery();
+          }
+        } else {
           let parseQuery = query.split("|");
           let queryFunctions = "";
           let whereClause = "";
@@ -853,7 +878,7 @@ export default defineComponent({
             whereClause = parseQuery[0].trim();
           }
 
-          query_context = `SELECT *${queryFunctions} FROM [INDEX_NAME] [WHERE_CLAUSE]`;
+          query_context = `SELECT *${queryFunctions} FROM "[INDEX_NAME]" [WHERE_CLAUSE]`;
 
           if (whereClause.trim() != "") {
             whereClause = whereClause
@@ -881,7 +906,7 @@ export default defineComponent({
 
             query_context = query_context.replace(
               "[WHERE_CLAUSE]",
-              " WHERE " + whereClause
+              " WHERE " + whereClause,
             );
           } else {
             query_context = query_context.replace("[WHERE_CLAUSE]", "");
@@ -914,71 +939,93 @@ export default defineComponent({
             streams = searchObj.data.stream.selectedStream.filter(
               (streams: any) =>
                 !searchObj.data.stream.missingStreamMultiStreamFilter.includes(
-                  streams
-                )
+                  streams,
+                ),
             );
           }
         }
         let countTotal = streams.length;
-        streams.forEach(async (selectedStream: string) => {
-          await streamService
-            .fieldValues({
-              org_identifier: store.state.selectedOrganization.identifier,
-              stream_name: selectedStream,
-              start_time: startISOTimestamp,
-              end_time: endISOTimestamp,
-              fields: [name],
-              size: 10,
-              query_context:
-                b64EncodeUnicode(
-                  query_context.replace("[INDEX_NAME]", selectedStream)
-                ) || "",
-              query_fn: query_fn,
-              type: searchObj.data.stream.streamType,
-              regions: searchObj.meta.hasOwnProperty("regions")
-                ? searchObj.meta.regions.join(",")
-                : "",
-            })
-            .then((res: any) => {
-              countTotal--;
-              if (res.data.hits.length) {
-                res.data.hits.forEach((item: any) => {
-                  item.values.forEach((subItem: any) => {
-                    if (fieldValues.value[name]["values"].length) {
-                      let index = fieldValues.value[name]["values"].findIndex(
-                        (value: any) => value.key == subItem.zo_sql_key
-                      );
-                      if (index != -1) {
-                        fieldValues.value[name]["values"][index].count =
-                          parseInt(subItem.zo_sql_num) +
-                          fieldValues.value[name]["values"][index].count;
+        for (const selectedStream of streams) {
+          if (streams.length > 1) {
+            query_context = "select * from [INDEX_NAME]";
+          }
+          if (searchObj.data.stream.selectedStream.length > 1) {
+            query_context = queries[selectedStream];
+          }
+          if (query_context !== "") {
+            query_context = query_context == undefined ? "" : query_context;
+            await streamService
+              .fieldValues({
+                org_identifier: store.state.selectedOrganization.identifier,
+                stream_name: selectedStream,
+                start_time: startISOTimestamp,
+                end_time: endISOTimestamp,
+                fields: [name],
+                size: 10,
+                query_context:
+                  b64EncodeUnicode(
+                    query_context.replace("[INDEX_NAME]", selectedStream),
+                  ) || "",
+                query_fn: query_fn,
+                type: searchObj.data.stream.streamType,
+                regions:
+                  Object.hasOwn(searchObj.meta, "regions") &&
+                  searchObj.meta.regions.length > 0
+                    ? searchObj.meta.regions.join(",")
+                    : "",
+              })
+              .then((res: any) => {
+                countTotal--;
+                if (res.data.hits.length) {
+                  res.data.hits.forEach((item: any) => {
+                    item.values.forEach((subItem: any) => {
+                      if (fieldValues.value[name]["values"].length) {
+                        let index = fieldValues.value[name]["values"].findIndex(
+                          (value: any) => value.key == subItem.zo_sql_key,
+                        );
+                        if (index != -1) {
+                          fieldValues.value[name]["values"][index].count =
+                            parseInt(subItem.zo_sql_num) +
+                            fieldValues.value[name]["values"][index].count;
+                        } else {
+                          fieldValues.value[name]["values"].push({
+                            key: subItem.zo_sql_key,
+                            count: subItem.zo_sql_num,
+                          });
+                        }
                       } else {
                         fieldValues.value[name]["values"].push({
                           key: subItem.zo_sql_key,
                           count: subItem.zo_sql_num,
                         });
                       }
-                    } else {
-                      fieldValues.value[name]["values"].push({
-                        key: subItem.zo_sql_key,
-                        count: subItem.zo_sql_num,
-                      });
-                    }
+                    });
                   });
-                });
-                if (fieldValues.value[name]["values"].length > 10) {
-                  fieldValues.value[name]["values"].sort(
-                    (a, b) => b.count - a.count
-                  ); // Sort the array based on count in descending order
-                  fieldValues.value[name]["values"].slice(0, 10); // Return the first 10 elements
+                  if (fieldValues.value[name]["values"].length > 10) {
+                    fieldValues.value[name]["values"].sort(
+                      (a, b) => b.count - a.count,
+                    ); // Sort the array based on count in descending order
+                    fieldValues.value[name]["values"] = fieldValues.value[name][
+                      "values"
+                    ].slice(0, 10); // Return the first 10 elements
+                  }
                 }
-              }
-            })
-            .finally(() => {
-              if (countTotal == 0) fieldValues.value[name]["isLoading"] = false;
-            });
-        });
+              })
+              .catch((err: any) => {
+                console.error("Failed to fetch field values:", err);
+                fieldValues.value[name].errMsg = "Failed to fetch field values";
+              })
+              .finally(() => {
+                countTotal--;
+                if (countTotal <= 0) {
+                  fieldValues.value[name].isLoading = false;
+                }
+              });
+          }
+        }
       } catch (err) {
+        fieldValues.value[name]["isLoading"] = false;
+
         console.log(err);
         $q.notify({
           type: "negative",
@@ -987,13 +1034,26 @@ export default defineComponent({
       }
     };
 
-    const addSearchTerm = (term: string) => {
-      // searchObj.meta.showDetailTab = false;
-      searchObj.data.stream.addToFilter = term;
-    };
+    const addSearchTerm = (
+      field: string,
+      field_value: string | number | boolean,
+      action: string,
+    ) => {
+      const expression = getFilterExpressionByFieldType(
+        field,
+        field_value,
+        action,
+      );
 
-    // const onStreamChange = () => {
-    //   alert("onStreamChange")
+      if (expression) {
+        searchObj.data.stream.addToFilter = expression;
+      } else {
+        $q.notify({
+          type: "negative",
+          message: "Failed to generate filter expression",
+        });
+      }
+    };
     //   const query = searchObj.meta.sqlMode
     //     ? `SELECT * FROM "${searchObj.data.stream.selectedStream.value}"`
     //     : "";
@@ -1008,16 +1068,16 @@ export default defineComponent({
     let fieldIndex: any = -1;
     const addToInterestingFieldList = (
       field: any,
-      isInterestingField: boolean
+      isInterestingField: boolean,
     ) => {
       if (selectedFieldsName.length == 0) {
         selectedFieldsName = searchObj.data.stream.selectedStreamFields.map(
-          (item: any) => item.name
+          (item: any) => item.name,
         );
       }
       if (isInterestingField) {
         const index = searchObj.data.stream.interestingFieldList.indexOf(
-          field.name
+          field.name,
         );
         if (index > -1) {
           // only splice array when item is found
@@ -1041,11 +1101,11 @@ export default defineComponent({
             let localFieldIndex = -1;
             for (const selectedStream of field.streams) {
               localFieldIndex = localStreamFields[
-                searchObj.organizationIdetifier + "_" + selectedStream
+                searchObj.organizationIdentifier + "_" + selectedStream
               ].indexOf(field.name);
               if (localFieldIndex > -1) {
                 localStreamFields[
-                  searchObj.organizationIdetifier + "_" + selectedStream
+                  searchObj.organizationIdentifier + "_" + selectedStream
                 ].splice(localFieldIndex, 1);
               }
             }
@@ -1054,7 +1114,7 @@ export default defineComponent({
         }
       } else {
         const index = searchObj.data.stream.interestingFieldList.indexOf(
-          field.name
+          field.name,
         );
         if (index == -1 && field.name != "*") {
           searchObj.data.stream.interestingFieldList.push(field.name);
@@ -1077,21 +1137,21 @@ export default defineComponent({
               if (selectedStream != undefined) {
                 if (
                   localStreamFields[
-                    searchObj.organizationIdetifier + "_" + selectedStream
+                    searchObj.organizationIdentifier + "_" + selectedStream
                   ] == undefined
                 ) {
                   localStreamFields[
-                    searchObj.organizationIdetifier + "_" + selectedStream
+                    searchObj.organizationIdentifier + "_" + selectedStream
                   ] = [];
                 }
 
                 if (
                   localStreamFields[
-                    searchObj.organizationIdetifier + "_" + selectedStream
+                    searchObj.organizationIdentifier + "_" + selectedStream
                   ].indexOf(field.name) == -1
                 ) {
                   localStreamFields[
-                    searchObj.organizationIdetifier + "_" + selectedStream
+                    searchObj.organizationIdentifier + "_" + selectedStream
                   ].push(field.name);
                 }
               }
@@ -1120,7 +1180,7 @@ export default defineComponent({
 
     const sortedStreamFields = () => {
       return searchObj.data.stream.selectedStreamFields.sort(
-        (a: any, b: any) => a.group - b.group
+        (a: any, b: any) => a.group - b.group,
       );
     };
 
@@ -1151,13 +1211,13 @@ export default defineComponent({
       toggleSchema,
       streamFieldsRows: computed(() => {
         let expandKeys = Object.keys(
-          searchObj.data.stream.expandGroupRows
+          searchObj.data.stream.expandGroupRows,
         ).reverse();
 
         let startIndex = 0;
         // Iterate over the keys in reverse order
         let selectedStreamFields = cloneDeep(
-          searchObj.data.stream.selectedStreamFields
+          searchObj.data.stream.selectedStreamFields,
         );
         let count = 0;
         // console.log(searchObj.data.stream.selectedStreamFields)
@@ -1180,7 +1240,7 @@ export default defineComponent({
               // console.log("========")
               selectedStreamFields.splice(
                 startIndex - count,
-                searchObj.data.stream.expandGroupRowsFieldCount[key]
+                searchObj.data.stream.expandGroupRowsFieldCount[key],
               );
             }
           } else {
@@ -1260,6 +1320,7 @@ $streamSelectorHeight: 44px;
     }
 
     .q-table__top {
+      padding: 0 !important;
       border-bottom: unset;
     }
   }
@@ -1393,37 +1454,63 @@ $streamSelectorHeight: 44px;
 </style>
 
 <style lang="scss">
-.index-table {
-  .q-table {
-    width: 100%;
-    table-layout: fixed;
+.logs-index-menu {
+  .index-table {
+    .q-table {
+      width: 100%;
+      table-layout: fixed;
 
-    .q-expansion-item {
-      .q-item {
-        display: flex;
-        align-items: center;
-        padding: 0;
-        height: 25px !important;
-        min-height: 25px !important;
-      }
-
-      .q-item__section--avatar {
-        min-width: 12px;
-        max-width: 12px;
-        margin-right: 8px;
-      }
-
-      .filter-values-container {
+      .q-expansion-item {
         .q-item {
-          padding-left: 4px;
+          display: flex;
+          align-items: center;
+          padding: 0;
+          height: 25px !important;
+          min-height: 25px !important;
+        }
 
-          .q-focus-helper {
-            background: none !important;
+        .q-item__section--avatar {
+          min-width: 12px;
+          max-width: 12px;
+          margin-right: 8px;
+        }
+
+        .filter-values-container {
+          .q-item {
+            padding-left: 4px;
+
+            .q-focus-helper {
+              background: none !important;
+            }
+          }
+        }
+
+        .q-item-type {
+          &:hover {
+            .field_overlay {
+              visibility: visible;
+
+              .q-icon {
+                opacity: 1;
+              }
+            }
+          }
+        }
+
+        .field-expansion-icon {
+          img {
+            width: 12px;
+            height: 12px;
+          }
+
+          .q-icon {
+            font-size: 18px;
+            color: #808080;
           }
         }
       }
 
-      .q-item-type {
+      .field-container {
         &:hover {
           .field_overlay {
             visibility: visible;
@@ -1435,79 +1522,51 @@ $streamSelectorHeight: 44px;
         }
       }
 
-      .field-expansion-icon {
-        img {
-          width: 12px;
-          height: 12px;
-        }
+      .field_list {
+        &.selected {
+          background-color: rgba(89, 96, 178, 0.3);
 
-        .q-icon {
-          font-size: 18px;
-          color: #808080;
-        }
-      }
-    }
-
-    .field-container {
-      &:hover {
-        .field_overlay {
-          visibility: visible;
-
-          .q-icon {
-            opacity: 1;
+          .field_overlay {
+            // background-color: #ffffff;
           }
         }
       }
     }
 
-    .field_list {
-      &.selected {
-        .q-expansion-item {
-          background-color: rgba(89, 96, 178, 0.3);
-        }
+    .schema-field-toggle {
+      border: 1px solid light-grey;
+      border-radius: 5px;
+      line-height: 10px;
+    }
 
-        .field_overlay {
-          // background-color: #ffffff;
-        }
-      }
+    .q-table__bottom {
+      padding: 0px !important;
+    }
+
+    .pagination-field-count {
+      line-height: 32px;
+      font-weight: 700;
+      font-size: 13px;
     }
   }
 
-  .schema-field-toggle {
-    border: 1px solid light-grey;
-    border-radius: 5px;
-    line-height: 10px;
-  }
+  .field-table {
+    .q-table__bottom {
+      padding: 5px !important;
+    }
 
-  .q-table__bottom {
-    padding: 0px !important;
-  }
-
-  .pagination-field-count {
-    line-height: 32px;
-    font-weight: 700;
-    font-size: 13px;
-  }
-}
-</style>
-
-<style lang="scss" scoped>
-.field-table {
-  .q-table__bottom {
-    padding: 5px !important;
-  }
-
-  .schema-field-toggle .q-btn {
-    padding: 5px !important;
+    .schema-field-toggle .q-btn {
+      padding: 5px !important;
+    }
   }
 }
 
-.q-field--auto-height.q-field--dense .q-field__control,
-.q-field--auto-height.q-field--dense .q-field__native,
-.q-field--auto-height.q-field--dense .q-field__native span {
-  text-overflow: ellipsis !important;
-  overflow: hidden !important;
-  white-space: nowrap !important;
-  max-height: 40px !important;
-}
+// .q-field--auto-height.q-field--dense .q-field__control,
+// .q-field--auto-height.q-field--dense .q-field__native,
+// .q-field--auto-height.q-field--dense .q-field__native span {
+//   text-overflow: ellipsis !important;
+//   overflow: hidden !important;
+//   white-space: nowrap !important;
+//   max-height: 40px !important;
+// }
 </style>

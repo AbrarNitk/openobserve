@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -79,7 +79,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
-import { defineComponent, ref } from "vue";
+import { defineComponent, inject, ref } from "vue";
 import { getImageURL } from "../../../utils/zincutils";
 import useDashboardPanelData from "../../../composables/useDashboardPanel";
 import { useStore } from "vuex";
@@ -137,14 +137,14 @@ export default defineComponent({
         id: "h-stacked",
       },
       {
-        image: "img:" + getImageURL("images/dashboard/charts/heatmap.png"),
-        title: t("dashboard.heatmapLabel"),
-        id: "heatmap",
-      },
-      {
         image: "img:" + getImageURL("images/dashboard/charts/geomap.png"),
         title: t("dashboard.geomapLabel"),
         id: "geomap",
+      },
+      {
+        image: "img:" + getImageURL("images/dashboard/charts/world-map.png"),
+        title: t("dashboard.worldmapLabel"),
+        id: "maps",
       },
       {
         image: "img:" + getImageURL("images/dashboard/charts/pie-chart.png"),
@@ -157,6 +157,11 @@ export default defineComponent({
         id: "donut",
       },
       {
+        image: "img:" + getImageURL("images/dashboard/charts/heatmap.png"),
+        title: t("dashboard.heatmapLabel"),
+        id: "heatmap",
+      },
+      {
         image: "img:" + getImageURL("images/dashboard/charts/table.png"),
         title: t("dashboard.tableLabel"),
         id: "table",
@@ -165,6 +170,11 @@ export default defineComponent({
         image: "img:" + getImageURL("images/dashboard/charts/123.png"),
         title: t("dashboard.metricTextLabel"),
         id: "metric",
+      },
+      {
+        image: "img:" + getImageURL("images/dashboard/charts/Gauge.png"),
+        title: "Gauge",
+        id: "gauge",
       },
       {
         image: "img:" + getImageURL("images/dashboard/charts/HTML.png"),
@@ -177,18 +187,19 @@ export default defineComponent({
         id: "markdown",
       },
       {
-        image: "img:" + getImageURL("images/dashboard/charts/Gauge.png"),
-        title: "Gauge",
-        id: "gauge",
-      },
-      {
         image: "img:" + getImageURL("images/dashboard/charts/sankey.svg"),
         title: "Sankey",
         id: "sankey",
-      }
+      },
     ]);
 
-    const { promqlMode, dashboardPanelData } = useDashboardPanelData();
+    const dashboardPanelDataPageKey = inject(
+      "dashboardPanelDataPageKey",
+      "dashboard",
+    );
+    const { promqlMode, dashboardPanelData } = useDashboardPanelData(
+      dashboardPanelDataPageKey,
+    );
     return {
       t,
       ChartsArray: chartsArray,

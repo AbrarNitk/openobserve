@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -18,24 +18,23 @@ use std::{io::Error, sync::Arc};
 use actix_web::{
     cookie,
     cookie::{Cookie, SameSite},
-    get,
+    get, head,
     http::header,
     put, web, HttpRequest, HttpResponse,
 };
 use arrow_schema::Schema;
 use config::{
-    cluster::{is_ingester, LOCAL_NODE_ROLE, LOCAL_NODE_UUID},
+    cluster::LOCAL_NODE,
     get_config, get_instance_id,
-    meta::cluster::NodeStatus,
+    meta::{cluster::NodeStatus, function::ZoFunction},
     utils::{json, schema_ext::SchemaExt},
     Config, QUICK_MODEL_FIELDS, SQL_FULL_TEXT_SEARCH_FIELDS,
 };
 use hashbrown::HashMap;
 use infra::{
-    cache, file_list,
-    schema::{
-        STREAM_SCHEMAS, STREAM_SCHEMAS_COMPRESSED, STREAM_SCHEMAS_FIELDS, STREAM_SCHEMAS_LATEST,
-    },
+    cache::{self, file_data::disk::FileType},
+    file_list,
+    schema::{STREAM_SCHEMAS, STREAM_SCHEMAS_COMPRESSED, STREAM_SCHEMAS_LATEST},
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -46,15 +45,15 @@ use {
         jwt::process_token,
         validator::{get_user_email_from_auth_str, ID_TOKEN_HEADER, PKCE_STATE_ORG},
     },
-    crate::service::usage::audit,
+    crate::service::self_reporting::audit,
     config::{ider, utils::base64},
     o2_enterprise::enterprise::{
         common::{
-            auditor::AuditMessage,
-            infra::config::O2_CONFIG,
+            auditor::{AuditMessage, HttpMeta, Protocol},
+            infra::config::{get_config as get_o2_config, refresh_config as refresh_o2_config},
             settings::{get_logo, get_logo_text},
         },
-        dex::service::auth::{exchange_code, get_dex_login, get_jwks, refresh_token},
+        dex::service::auth::{exchange_code, get_dex_jwks, get_dex_login, refresh_token},
     },
     std::io::ErrorKind,
 };
@@ -63,14 +62,16 @@ use crate::{
     common::{
         infra::{cluster, config::*},
         meta::{
-            functions::ZoFunction,
             http::HttpResponse as MetaHttpResponse,
             user::{AuthTokens, AuthTokensExt},
         },
     },
     service::{
         db,
-        search::datafusion::{storage::file_statistics_cache, DEFAULT_FUNCTIONS},
+        search::{
+            datafusion::{storage::file_statistics_cache, udf::DEFAULT_FUNCTIONS},
+            tantivy::puffin_directory::reader_cache,
+        },
     },
 };
 
@@ -94,6 +95,7 @@ struct ConfigResponse<'a> {
     timestamp_column: String,
     syslog_enabled: bool,
     data_retention_days: i64,
+    extended_data_retention_days: i64,
     restricted_routes_on_empty_data: bool,
     sso_enabled: bool,
     native_login_enabled: bool,
@@ -107,10 +109,16 @@ struct ConfigResponse<'a> {
     rum: Rum,
     custom_logo_img: Option<String>,
     custom_hide_menus: String,
+    custom_hide_self_logo: bool,
     meta_org: String,
     quick_mode_enabled: bool,
     user_defined_schemas_enabled: bool,
+    user_defined_schema_max_fields: usize,
     all_fields_name: String,
+    usage_enabled: bool,
+    usage_publish_interval: i64,
+    websocket_enabled: bool,
+    min_auto_refresh_interval: u32,
 }
 
 #[derive(Serialize)]
@@ -132,7 +140,7 @@ struct Rum {
     path = "/healthz",
     tag = "Meta",
     responses(
-        (status = 200, description="Staus OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "ok"}))
+        (status = 200, description="Status OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "ok"}))
     )
 )]
 #[get("/healthz")]
@@ -142,18 +150,25 @@ pub async fn healthz() -> Result<HttpResponse, Error> {
     }))
 }
 
+/// Healthz HEAD
+/// Vector pipeline healthcheck support
+#[head("/healthz")]
+pub async fn healthz_head() -> Result<HttpResponse, Error> {
+    Ok(HttpResponse::Ok().finish())
+}
+
 /// Healthz of the node for scheduled status
 #[utoipa::path(
     path = "/schedulez",
     tag = "Meta",
     responses(
-        (status = 200, description="Staus OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "ok"})),
-        (status = 404, description="Staus Not OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "not ok"})),
+        (status = 200, description="Status OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "ok"})),
+        (status = 404, description="Status Not OK", content_type = "application/json", body = HealthzResponse, example = json!({"status": "not ok"})),
     )
 )]
 #[get("/schedulez")]
 pub async fn schedulez() -> Result<HttpResponse, Error> {
-    let node_id = LOCAL_NODE_UUID.clone();
+    let node_id = LOCAL_NODE.uuid.clone();
     let Some(node) = cluster::get_node_by_uuid(&node_id).await else {
         return Ok(HttpResponse::NotFound().json(HealthzResponse {
             status: "not ok".to_string(),
@@ -173,37 +188,39 @@ pub async fn schedulez() -> Result<HttpResponse, Error> {
 #[get("")]
 pub async fn zo_config() -> Result<HttpResponse, Error> {
     #[cfg(feature = "enterprise")]
-    let sso_enabled = O2_CONFIG.dex.dex_enabled;
+    let o2cfg = get_o2_config();
+    #[cfg(feature = "enterprise")]
+    let sso_enabled = o2cfg.dex.dex_enabled;
     #[cfg(not(feature = "enterprise"))]
     let sso_enabled = false;
     #[cfg(feature = "enterprise")]
-    let native_login_enabled = O2_CONFIG.dex.native_login_enabled;
+    let native_login_enabled = o2cfg.dex.native_login_enabled;
     #[cfg(not(feature = "enterprise"))]
     let native_login_enabled = true;
 
     #[cfg(feature = "enterprise")]
-    let rbac_enabled = O2_CONFIG.openfga.enabled;
+    let rbac_enabled = o2cfg.openfga.enabled;
     #[cfg(not(feature = "enterprise"))]
     let rbac_enabled = false;
 
     #[cfg(feature = "enterprise")]
-    let super_cluster_enabled = O2_CONFIG.super_cluster.enabled;
+    let super_cluster_enabled = o2cfg.super_cluster.enabled;
     #[cfg(not(feature = "enterprise"))]
     let super_cluster_enabled = false;
 
     #[cfg(feature = "enterprise")]
     let custom_logo_text = match get_logo_text().await {
         Some(data) => data,
-        None => O2_CONFIG.common.custom_logo_text.clone(),
+        None => o2cfg.common.custom_logo_text.clone(),
     };
     #[cfg(not(feature = "enterprise"))]
     let custom_logo_text = "".to_string();
     #[cfg(feature = "enterprise")]
-    let custom_slack_url = &O2_CONFIG.common.custom_slack_url;
+    let custom_slack_url = &o2cfg.common.custom_slack_url;
     #[cfg(not(feature = "enterprise"))]
     let custom_slack_url = "";
     #[cfg(feature = "enterprise")]
-    let custom_docs_url = &O2_CONFIG.common.custom_docs_url;
+    let custom_docs_url = &o2cfg.common.custom_docs_url;
     #[cfg(not(feature = "enterprise"))]
     let custom_docs_url = "";
 
@@ -214,9 +231,14 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
     let logo = None;
 
     #[cfg(feature = "enterprise")]
-    let custom_hide_menus = &O2_CONFIG.common.custom_hide_menus;
+    let custom_hide_menus = &o2cfg.common.custom_hide_menus;
     #[cfg(not(feature = "enterprise"))]
     let custom_hide_menus = "";
+
+    #[cfg(feature = "enterprise")]
+    let custom_hide_self_logo = o2cfg.common.custom_hide_self_logo;
+    #[cfg(not(feature = "enterprise"))]
+    let custom_hide_self_logo = false;
 
     #[cfg(feature = "enterprise")]
     let build_type = "enterprise";
@@ -240,6 +262,7 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         timestamp_column: cfg.common.column_timestamp.clone(),
         syslog_enabled: *SYSLOG_ENABLED.read(),
         data_retention_days: cfg.compact.data_retention_days,
+        extended_data_retention_days: cfg.compact.extended_data_retention_days,
         restricted_routes_on_empty_data: cfg.common.restricted_routes_on_empty_data,
         sso_enabled,
         native_login_enabled,
@@ -252,6 +275,7 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         custom_docs_url: custom_docs_url.to_string(),
         custom_logo_img: logo,
         custom_hide_menus: custom_hide_menus.to_string(),
+        custom_hide_self_logo,
         rum: Rum {
             enabled: cfg.rum.enabled,
             client_token: cfg.rum.client_token.to_string(),
@@ -267,7 +291,12 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         meta_org: cfg.common.usage_org.to_string(),
         quick_mode_enabled: cfg.limit.quick_mode_enabled,
         user_defined_schemas_enabled: cfg.common.allow_user_defined_schemas,
+        user_defined_schema_max_fields: cfg.limit.user_defined_schema_max_fields,
         all_fields_name: cfg.common.column_all.to_string(),
+        usage_enabled: cfg.common.usage_enabled,
+        usage_publish_interval: cfg.common.usage_publish_interval,
+        websocket_enabled: cfg.common.websocket_enabled,
+        min_auto_refresh_interval: cfg.common.min_auto_refresh_interval,
     }))
 }
 
@@ -275,7 +304,7 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
 pub async fn cache_status() -> Result<HttpResponse, Error> {
     let cfg = get_config();
     let mut stats: HashMap<&str, json::Value> = HashMap::default();
-    stats.insert("LOCAL_NODE_UUID", json::json!(LOCAL_NODE_UUID.clone()));
+    stats.insert("LOCAL_NODE_UUID", json::json!(LOCAL_NODE.uuid.clone()));
     stats.insert("LOCAL_NODE_NAME", json::json!(&cfg.common.instance_name));
     stats.insert("LOCAL_NODE_ROLE", json::json!(&cfg.common.node_role));
     let nodes = cluster::get_cached_online_nodes().await;
@@ -293,13 +322,17 @@ pub async fn cache_status() -> Result<HttpResponse, Error> {
 
     let mem_file_num = cache::file_data::memory::len().await;
     let (mem_max_size, mem_cur_size) = cache::file_data::memory::stats().await;
-    let disk_file_num = cache::file_data::disk::len().await;
-    let (disk_max_size, disk_cur_size) = cache::file_data::disk::stats().await;
+    let disk_file_num = cache::file_data::disk::len(FileType::DATA).await;
+    let (disk_max_size, disk_cur_size) = cache::file_data::disk::stats(FileType::DATA).await;
+    let disk_result_file_num = cache::file_data::disk::len(FileType::RESULT).await;
+    let (disk_result_max_size, disk_result_cur_size) =
+        cache::file_data::disk::stats(FileType::RESULT).await;
     stats.insert(
         "FILE_DATA",
         json::json!({
             "memory":{"cache_files":mem_file_num, "cache_limit":mem_max_size,"cache_bytes": mem_cur_size},
-            "disk":{"cache_files":disk_file_num, "cache_limit":disk_max_size,"cache_bytes": disk_cur_size}
+            "disk":{"cache_files":disk_file_num, "cache_limit":disk_max_size,"cache_bytes": disk_cur_size},
+            "results":{"cache_files":disk_result_file_num, "cache_limit":disk_result_max_size,"cache_bytes": disk_result_cur_size}
         }),
     );
 
@@ -322,6 +355,13 @@ pub async fn cache_status() -> Result<HttpResponse, Error> {
         "DATAFUSION",
         json::json!({"file_stat_cache": file_statistics_cache::GLOBAL_CACHE.clone().len()}),
     );
+    stats.insert(
+        "INVERTED_INDEX",
+        json::json!({"reader_cache": reader_cache::GLOBAL_CACHE.clone().len()}),
+    );
+
+    let consistent_hashing = cluster::print_consistent_hash().await;
+    stats.insert("CONSISTENT_HASHING", json::json!(consistent_hashing));
 
     Ok(HttpResponse::Ok().json(stats))
 }
@@ -333,19 +373,27 @@ pub async fn config_reload() -> Result<HttpResponse, Error> {
             HttpResponse::InternalServerError().json(serde_json::json!({"status": e.to_string()}))
         );
     }
-    let status = "succcessfully reloaded config";
+    #[cfg(feature = "enterprise")]
+    if let Err(e) = refresh_o2_config() {
+        return Ok(
+            HttpResponse::InternalServerError().json(serde_json::json!({"status": e.to_string()}))
+        );
+    }
+    let status = "successfully reloaded config";
     // Audit this event
     #[cfg(feature = "enterprise")]
     audit(AuditMessage {
         // Since this is not a protected route, there is no way to get the user email
         user_email: "".to_string(),
         org_id: "".to_string(),
-        method: "GET".to_string(),
         _timestamp: chrono::Utc::now().timestamp_micros(),
-        path: "/config/reload".to_string(),
-        query_params: "".to_string(),
-        body: "".to_string(),
-        response_code: 200,
+        protocol: Protocol::Http(HttpMeta {
+            method: "GET".to_string(),
+            path: "/config/reload".to_string(),
+            query_params: "".to_string(),
+            body: "".to_string(),
+            response_code: 200,
+        }),
     })
     .await;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": status})))
@@ -387,7 +435,7 @@ async fn get_stream_schema_status() -> (usize, usize, usize) {
 #[cfg(feature = "enterprise")]
 #[get("/redirect")]
 pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
-    use crate::common::meta::user::AuthTokens;
+    use crate::common::meta::user::{AuthTokens, UserRole};
 
     let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
     let code = match query.get("code") {
@@ -399,12 +447,14 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
     let mut audit_message = AuditMessage {
         user_email: "".to_string(),
         org_id: "".to_string(),
-        method: "GET".to_string(),
-        path: "/config/redirect".to_string(),
-        body: "".to_string(),
-        query_params: req.query_string().to_string(),
-        response_code: 302,
         _timestamp: chrono::Utc::now().timestamp_micros(),
+        protocol: Protocol::Http(HttpMeta {
+            method: "GET".to_string(),
+            path: "/config/redirect".to_string(),
+            body: "".to_string(),
+            query_params: req.query_string().to_string(),
+            response_code: 302,
+        }),
     };
 
     match query.get("state") {
@@ -414,7 +464,9 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
             }
             Err(_) => {
                 // Bad Request
-                audit_message.response_code = 400;
+                if let Protocol::Http(ref mut http_meta) = audit_message.protocol {
+                    http_meta.response_code = 400;
+                }
                 audit(audit_message).await;
                 return Err(Error::new(ErrorKind::Other, "invalid state in request"));
             }
@@ -422,7 +474,9 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
 
         None => {
             // Bad Request
-            audit_message.response_code = 400;
+            if let Protocol::Http(ref mut http_meta) = audit_message.protocol {
+                http_meta.response_code = 400;
+            }
             audit(audit_message).await;
             return Err(Error::new(ErrorKind::Other, "no state in request"));
         }
@@ -434,12 +488,30 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
         Ok(login_data) => {
             let login_url;
             let access_token = login_data.access_token;
-            let keys = get_jwks().await;
-            let token_ver =
-                verify_decode_token(&access_token, &keys, &O2_CONFIG.dex.client_id, true).await;
+            let keys = get_dex_jwks().await;
+            let token_ver = verify_decode_token(
+                &access_token,
+                &keys,
+                &get_o2_config().dex.client_id,
+                true,
+                true,
+            )
+            .await;
             let id_token;
             match token_ver {
                 Ok(res) => {
+                    // check for service accounts , do not to allow login
+                    if let Some(db_user) = db::user::get_user_by_email(&res.0.user_email).await {
+                        if db_user
+                            .organizations
+                            .iter()
+                            .any(|org| org.role.eq(&UserRole::ServiceAccount))
+                        {
+                            return Ok(HttpResponse::Unauthorized()
+                                .json("Service accounts are not allowed to login".to_string()));
+                        }
+                    }
+
                     audit_message.user_email = res.0.user_email.clone();
                     id_token = json::to_string(&json::json!({
                         "email": res.0.user_email,
@@ -458,7 +530,9 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
                     process_token(res).await
                 }
                 Err(e) => {
-                    audit_message.response_code = 401;
+                    if let Protocol::Http(ref mut http_meta) = audit_message.protocol {
+                        http_meta.response_code = 400;
+                    }
                     audit_message._timestamp = chrono::Utc::now().timestamp_micros();
                     audit(audit_message).await;
                     return Ok(HttpResponse::Unauthorized().json(e.to_string()));
@@ -502,7 +576,9 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
                 .finish())
         }
         Err(e) => {
-            audit_message.response_code = 401;
+            if let Protocol::Http(ref mut http_meta) = audit_message.protocol {
+                http_meta.response_code = 400;
+            }
             audit_message._timestamp = chrono::Utc::now().timestamp_micros();
             audit(audit_message).await;
             Ok(HttpResponse::Unauthorized().json(e.to_string()))
@@ -649,12 +725,14 @@ async fn logout(req: actix_web::HttpRequest) -> HttpResponse {
         audit(AuditMessage {
             user_email,
             org_id: "".to_string(),
-            method: "GET".to_string(),
             _timestamp: chrono::Utc::now().timestamp_micros(),
-            path: "/config/logout".to_string(),
-            query_params: req.query_string().to_string(),
-            body: "".to_string(),
-            response_code: 200,
+            protocol: Protocol::Http(HttpMeta {
+                method: "GET".to_string(),
+                path: "/config/logout".to_string(),
+                query_params: req.query_string().to_string(),
+                body: "".to_string(),
+                response_code: 200,
+            }),
         })
         .await;
     }
@@ -668,7 +746,7 @@ async fn logout(req: actix_web::HttpRequest) -> HttpResponse {
 
 #[put("/enable")]
 async fn enable_node(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let node_id = LOCAL_NODE_UUID.clone();
+    let node_id = LOCAL_NODE.uuid.clone();
     let Some(mut node) = cluster::get_node_by_uuid(&node_id).await else {
         return Ok(MetaHttpResponse::not_found("node not found"));
     };
@@ -679,6 +757,10 @@ async fn enable_node(req: HttpRequest) -> Result<HttpResponse, Error> {
         None => false,
     };
     node.scheduled = enable;
+    if !node.scheduled {
+        // release all the searching files
+        crate::common::infra::wal::clean_lock_files();
+    }
     match cluster::update_local_node(&node).await {
         Ok(_) => Ok(MetaHttpResponse::json(true)),
         Err(e) => Ok(MetaHttpResponse::internal_error(e)),
@@ -687,23 +769,15 @@ async fn enable_node(req: HttpRequest) -> Result<HttpResponse, Error> {
 
 #[put("/flush")]
 async fn flush_node() -> Result<HttpResponse, Error> {
-    if !is_ingester(&LOCAL_NODE_ROLE) {
+    if !LOCAL_NODE.is_ingester() {
         return Ok(MetaHttpResponse::not_found("local node is not an ingester"));
     };
+
+    // release all the searching files
+    crate::common::infra::wal::clean_lock_files();
 
     match ingester::flush_all().await {
         Ok(_) => Ok(MetaHttpResponse::json(true)),
         Err(e) => Ok(MetaHttpResponse::internal_error(e)),
     }
-}
-
-#[get("/stream_fields/{org_id}/{stream_type}/{stream_name}")]
-async fn stream_fields(path: web::Path<(String, String, String)>) -> Result<HttpResponse, Error> {
-    let (org_id, stream_type, stream_name) = path.into_inner();
-    let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
-    let r = STREAM_SCHEMAS_FIELDS.read().await;
-    Ok(MetaHttpResponse::json(match r.get(&key) {
-        Some((updated, fields)) => json::json!({"updated_at": *updated, "fields": fields}),
-        None => json::json!({"updated_at": 0, "fields": []}),
-    }))
 }

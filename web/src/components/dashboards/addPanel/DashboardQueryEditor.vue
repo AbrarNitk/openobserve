@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -98,7 +98,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           data-test="`dashboard-panel-query-tab-add`"
         ></q-btn>
       </div>
-      <div>
+      <div style="display: flex; gap: 4px">
+        <q-toggle
+          data-test="logs-search-bar-show-query-toggle-btn"
+          v-model="dashboardPanelData.layout.vrlFunctionToggle"
+          :icon="'img:' + getImageURL('images/common/function.svg')"
+          title="Toggle Function Editor"
+          class="float-left"
+          size="28px"
+          @update:model-value="onFunctionToggle"
+          :disable="promqlMode"
+        />
         <QueryTypeSelector></QueryTypeSelector>
       </div>
     </q-bar>
@@ -112,28 +122,130 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     data-test="dashboard-query"
   >
     <div class="column" style="width: 100%; height: 100%">
-      <div class="col" style="width: 100%">
-        <query-editor
-          ref="queryEditorRef"
-          class="monaco-editor"
-          v-model:query="currentQuery"
-          data-test="dashboard-panel-query-editor"
-          v-model:functions="dashboardPanelData.meta.stream.functions"
-          v-model:fields="dashboardPanelData.meta.stream.selectedStreamFields"
-          :keywords="
-            dashboardPanelData.data.queryType === 'promql'
-              ? autoCompletePromqlKeywords
-              : []
-          "
-          @update-query="updateQuery"
-          @run-query="searchData"
-          :readOnly="
-            !dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].customQuery
-          "
-          :language="dashboardPanelData.data.queryType"
-        ></query-editor>
+      <div class="col" style="width: 100%; height: 100%">
+        <div class="row" style="height: 100%">
+          <q-splitter
+            no-scroll
+            style="width: 100%; height: 100%"
+            v-model="splitterModel"
+            :limits="[
+              30,
+              promqlMode || !dashboardPanelData.layout.vrlFunctionToggle
+                ? 100
+                : 70,
+            ]"
+            :disable="
+              promqlMode || !dashboardPanelData.layout.vrlFunctionToggle
+            "
+          >
+            <template #before>
+              <SqlQueryEditor
+                ref="queryEditorRef"
+                class="monaco-editor"
+                style="width: 100%"
+                v-model:query="currentQuery"
+                data-test="dashboard-panel-query-editor"
+                v-model:functions="dashboardPanelData.meta.stream.functions"
+                v-model:fields="selectedStreamFieldsBasedOnUserDefinedSchema"
+                :keywords="
+                  dashboardPanelData.data.queryType === 'promql'
+                    ? autoCompletePromqlKeywords
+                    : []
+                "
+                @update-query="updateQuery"
+                @run-query="searchData"
+                :readOnly="
+                  !dashboardPanelData.data.queries[
+                    dashboardPanelData.layout.currentQueryIndex
+                  ].customQuery
+                "
+                :language="dashboardPanelData.data.queryType"
+              ></SqlQueryEditor>
+            </template>
+            <template #after>
+              <div style="height: 100%; width: 100%">
+                <div style="height: calc(100% - 40px); width: 100%">
+                  <query-editor
+                    v-if="!promqlMode"
+                    data-test="dashboard-vrl-function-editor"
+                    style="width: 100%; height: 100%"
+                    ref="vrlFnEditorRef"
+                    editor-id="fnEditor"
+                    class="monaco-editor"
+                    v-model:query="
+                      dashboardPanelData.data.queries[
+                        dashboardPanelData.layout.currentQueryIndex
+                      ].vrlFunctionQuery
+                    "
+                    :class="
+                      dashboardPanelData.data.queries[
+                        dashboardPanelData.layout.currentQueryIndex
+                      ]?.vrlFunctionQuery == '' && functionEditorPlaceholderFlag
+                        ? 'empty-function'
+                        : ''
+                    "
+                    language="ruby"
+                    @focus="functionEditorPlaceholderFlag = false"
+                    @blur="functionEditorPlaceholderFlag = true"
+                  />
+                </div>
+                <div style="height: 40px; width: 100%">
+                  <div style="display: flex; height: 40px">
+                    <q-select
+                      v-model="selectedFunction"
+                      label="Use Saved function"
+                      :options="functionOptions"
+                      data-test="dashboard-use-saved-vrl-function"
+                      input-debounce="0"
+                      behavior="menu"
+                      use-input
+                      filled
+                      borderless
+                      dense
+                      hide-selected
+                      menu-anchor="top left"
+                      fill-input
+                      @filter="filterFunctionOptions"
+                      option-label="name"
+                      option-value="function"
+                      @update:modelValue="onFunctionSelect"
+                      style="width: 100%"
+                    >
+                      <template #no-option>
+                        <q-item>
+                          <q-item-section>
+                            {{ t("search.noResult") }}</q-item-section
+                          >
+                        </q-item>
+                      </template>
+                    </q-select>
+                    <q-btn
+                      no-caps
+                      padding="xs"
+                      class=""
+                      size="sm"
+                      flat
+                      icon="info_outline"
+                      data-test="dashboard-addpanel-config-drilldown-info"
+                    >
+                      <q-tooltip
+                        class="bg-grey-8"
+                        anchor="bottom middle"
+                        self="top right"
+                        max-width="250px"
+                      >
+                        To use extracted VRL fields in the chart, write a VRL
+                        function and click on the Apply button. The fields will
+                        be extracted, allowing you to use them to build the
+                        chart.
+                      </q-tooltip>
+                    </q-btn>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </q-splitter>
+        </div>
       </div>
       <div style="color: red; z-index: 100000" class="q-mx-sm col-auto">
         {{ dashboardPanelData.meta.errors.queryErrors.join(", ") }}
@@ -148,29 +260,34 @@ import {
   defineComponent,
   ref,
   watch,
-  reactive,
-  toRaw,
-  onActivated,
   computed,
   onMounted,
-  onBeforeMount,
   defineAsyncComponent,
+  nextTick,
+  onUnmounted,
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
-import { useQuasar } from "quasar";
-
 import ConfirmDialog from "../../../components/ConfirmDialog.vue";
 import useDashboardPanelData from "../../../composables/useDashboardPanel";
 import QueryTypeSelector from "../addPanel/QueryTypeSelector.vue";
 import usePromqlSuggestions from "@/composables/usePromqlSuggestions";
+import { inject } from "vue";
+import { onBeforeMount } from "vue";
+import { getImageURL } from "@/utils/zincutils";
+import useNotifications from "@/composables/useNotifications";
+import { useStore } from "vuex";
+import useFunctions from "@/composables/useFunctions";
 
 export default defineComponent({
   name: "DashboardQueryEditor",
   components: {
-    QueryEditor: defineAsyncComponent(() => import("../QueryEditor.vue")),
+    SqlQueryEditor: defineAsyncComponent(() => import("../QueryEditor.vue")),
     ConfirmDialog,
     QueryTypeSelector,
+    queryEditor: defineAsyncComponent(
+      () => import("@/components/QueryEditor.vue")
+    ),
   },
   emits: ["searchdata"],
   methods: {
@@ -181,32 +298,100 @@ export default defineComponent({
   setup() {
     const router = useRouter();
     const { t } = useI18n();
-    const $q = useQuasar();
+    const { showErrorNotification, showPositiveNotification } =
+      useNotifications();
+    const store = useStore();
+    const dashboardPanelDataPageKey = inject(
+      "dashboardPanelDataPageKey",
+      "dashboard"
+    );
+
+    const { getAllFunctions } = useFunctions();
+    const functionList = ref([]);
+    const functionOptions = ref([]);
+    const selectedFunction = ref("");
+
+    const getFunctions = async () => {
+      try {
+        if (store.state.organizationData.functions.length == 0) {
+          await getAllFunctions();
+        }
+
+        store.state.organizationData.functions.map((data: any) => {
+          const args: any = [];
+          for (let i = 0; i < parseInt(data.num_args); i++) {
+            args.push("'${1:value}'");
+          }
+
+          const itemObj: {
+            name: any;
+            args: string;
+          } = {
+            name: data.name,
+            args: "(" + args.join(",") + ")",
+          };
+
+          functionList.value.push({
+            name: data.name,
+            function: data.function,
+          });
+          // if (!data.stream_name) {
+          //   searchObj.data.stream.functions.push(itemObj);
+          // }
+        });
+        return;
+      } catch (e) {
+        showErrorNotification("Error while fetching functions");
+      }
+    };
+
+    const filterFunctionOptions = (val: string, update: any) => {
+      update(() => {
+        functionOptions.value = functionList.value.filter((fn: any) => {
+          return fn.name.toLowerCase().indexOf(val.toLowerCase()) > -1;
+        });
+      });
+    };
+
+    const onFunctionSelect = (val: any) => {
+      // assign selected vrl function
+      dashboardPanelData.data.queries[
+        dashboardPanelData.layout.currentQueryIndex
+      ].vrlFunctionQuery = val.function;
+      // clear v-model
+      selectedFunction.value = "";
+
+      // show success message
+      showPositiveNotification(`${val.name} function applied successfully.`);
+    };
+
     const {
       dashboardPanelData,
       promqlMode,
-      updateXYFieldsOnCustomQueryChange,
       addQuery,
       removeQuery,
-    } = useDashboardPanelData();
+      selectedStreamFieldsBasedOnUserDefinedSchema,
+    } = useDashboardPanelData(dashboardPanelDataPageKey);
+
+    const splitterModel = ref(
+      promqlMode || !dashboardPanelData.layout.vrlFunctionToggle ? 100 : 70
+    );
+
+    watch(
+      () => splitterModel.value,
+      () => {
+        window.dispatchEvent(new Event("resize"));
+      }
+    );
     const confirmQueryModeChangeDialog = ref(false);
-    let parser: any;
 
     const { autoCompleteData, autoCompletePromqlKeywords, getSuggestions } =
       usePromqlSuggestions();
 
     const queryEditorRef = ref(null);
 
-    onBeforeMount(async () => {
-      await importSqlParser();
-      updateQueryValue();
-    });
-
-    const importSqlParser = async () => {
-      const useSqlParser: any = await import("@/composables/useParser");
-      const { sqlParser }: any = useSqlParser.default();
-      parser = await sqlParser();
-    };
+    const functionEditorPlaceholderFlag = ref(true);
+    const vrlFnEditorRef = ref(null);
 
     const addTab = () => {
       addQuery();
@@ -218,6 +403,17 @@ export default defineComponent({
         updatePromQLQuery(query, fields);
       }
     };
+
+    watch(
+      () => [promqlMode.value, dashboardPanelData.layout.vrlFunctionToggle],
+      () => {
+        if (promqlMode.value || !dashboardPanelData.layout.vrlFunctionToggle) {
+          splitterModel.value = 100;
+        } else {
+          splitterModel.value = 70;
+        }
+      }
+    );
 
     const removeTab = async (index) => {
       if (
@@ -264,554 +460,39 @@ export default defineComponent({
       }
     );
 
-    onMounted(() => {
-      dashboardPanelData.meta.errors.queryErrors = [];
+    // this is only for VRLs
+    const resizeEventListener = async () => {
+      await nextTick();
+      vrlFnEditorRef?.value?.resetEditorLayout();
+    };
+
+    onMounted(async () => {
+      window.removeEventListener("resize", resizeEventListener);
+      window.addEventListener("resize", resizeEventListener);
+      getFunctions();
     });
 
-    let query = "";
-    // Generate the query when the fields are updated
-    watch(
-      () => [
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.stream,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.x,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.y,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.z,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.filter,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].customQuery,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.latitude,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.longitude,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.weight,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.source,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.target,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.value,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].config.limit,
-      ],
-      () => {
-        // only continue if current mode is auto query generation
-        if (
-          !dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].customQuery
-        ) {
-          if (dashboardPanelData.data.type == "geomap") {
-            query = geoMapChart();
-          } else if (dashboardPanelData.data.type == "sankey") {
-            query = sankeyChartQuery();
-          } else {
-            query = sqlchart();
-          }
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].query = query;
-        }
-      },
-      { deep: true }
-    );
+    onUnmounted(() => {
+      window.removeEventListener("resize", resizeEventListener);
+    });
+    // End for VRL resize
 
-    const geoMapChart = () => {
-      let query = "";
+    onMounted(() => {
+      dashboardPanelData.meta.errors.queryErrors = [];
+      vrlFnEditorRef?.value?.resetEditorLayout();
+    });
 
-      const { latitude, longitude, weight } =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields;
-
-      if (latitude && longitude) {
-        query += `SELECT ${latitude.column} as ${latitude.alias}, ${longitude.column} as ${longitude.alias}`;
-      } else if (latitude) {
-        query += `SELECT ${latitude.column} as ${latitude.alias}`;
-      } else if (longitude) {
-        query += `SELECT ${longitude.column} as ${longitude.alias}`;
-      }
-
-      if (query) {
-        if (weight) {
-          switch (weight.aggregationFunction) {
-            case "p50":
-              query += `, approx_percentile_cont(${weight.column}, 0.5) as ${weight.alias}`;
-              break;
-            case "p90":
-              query += `, approx_percentile_cont(${weight.column}, 0.9) as ${weight.alias}`;
-              break;
-            case "p95":
-              query += `, approx_percentile_cont(${weight.column}, 0.95) as ${weight.alias}`;
-              break;
-            case "p99":
-              query += `, approx_percentile_cont(${weight.column}, 0.99) as ${weight.alias}`;
-              break;
-            case "count-distinct":
-              query += `, count(distinct(${weight.column})) as ${weight.alias}`;
-              break;
-            default:
-              query += `, ${weight.aggregationFunction}(${weight.column}) as ${weight.alias}`;
-              break;
-          }
-        }
-        query += ` FROM "${
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.stream
-        }" `;
-      }
-
-      // Add WHERE clause based on applied filters
-      const filterData =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.filter;
-
-      const filterItems = filterData.map((field) => {
-        let selectFilter = "";
-        // Handle different filter types and operators
-        if (field.type == "list" && field.values?.length > 0) {
-          selectFilter += `${field.column} IN (${field.values
-            .map((it) => `'${it}'`)
-            .join(", ")})`;
-        } else if (field.type == "condition" && field.operator != null) {
-          selectFilter += `${field?.column} `;
-          if (["Is Null", "Is Not Null"].includes(field.operator)) {
-            switch (field?.operator) {
-              case "Is Null":
-                selectFilter += `IS NULL`;
-                break;
-              case "Is Not Null":
-                selectFilter += `IS NOT NULL`;
-                break;
-            }
-          } else if (field.value != null && field.value != "") {
-            switch (field.operator) {
-              case "=":
-              case "<>":
-              case "<":
-              case ">":
-              case "<=":
-              case ">=":
-                selectFilter += `${field?.operator} ${field?.value}`;
-                break;
-              case "Contains":
-                selectFilter += `LIKE '%${field.value}%'`;
-                break;
-              case "Not Contains":
-                selectFilter += `NOT LIKE '%${field.value}%'`;
-                break;
-              default:
-                selectFilter += `${field.operator} ${field.value}`;
-                break;
-            }
-          }
-        }
-        return selectFilter;
-      });
-
-      const whereClause = filterItems.filter((it) => it).join(" AND ");
-      if (whereClause) {
-        query += ` WHERE ${whereClause} `;
-      }
-
-      // Group By clause
-      if (latitude || longitude) {
-        const aliases = [latitude?.alias, longitude?.alias]
-          .filter(Boolean)
-          .join(", ");
-        query += `GROUP BY ${aliases}`;
-      }
-
-      // array of sorting fields with followed by asc or desc
-      const orderByArr = [];
-
-      [latitude, longitude, weight].forEach((it: any) => {
-        // ignore if None is selected or sortBy is not there
-        if (it?.sortBy) {
-          orderByArr.push(`${it.alias} ${it.sortBy}`);
-        }
-      });
-
-      // append with query by joining array with comma
-      query += orderByArr.length ? " ORDER BY " + orderByArr.join(", ") : "";
-
-      // append limit
-      // if limit is less than or equal to 0 then don't add
-      const queryLimit =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].config.limit ?? 0;
-      query += queryLimit > 0 ? " LIMIT " + queryLimit : "";
-
-      return query;
-    };
-
-    const sankeyChartQuery = () => {
-      const queryData =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ];
-      const { source, target, value } = queryData.fields;
-      const stream = queryData.fields.stream;
-
-      if (!source && !target && !value) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].query = "";
-        return;
-      }
-
-      let query = "SELECT ";
-      const selectFields = [];
-
-      if (source) {
-        selectFields.push(`${source.column} as ${source.alias}`);
-      }
-
-      if (target) {
-        selectFields.push(`${target.column} as ${target.alias}`);
-      }
-
-      if (value) {
-        switch (value?.aggregationFunction) {
-          case "p50":
-            selectFields.push(
-              `approx_percentile_cont(${value?.column}, 0.5) as ${value.alias}`
-            );
-            break;
-          case "p90":
-            selectFields.push(
-              `approx_percentile_cont(${value?.column}, 0.9) as ${value.alias}`
-            );
-            break;
-          case "p95":
-            selectFields.push(
-              `approx_percentile_cont(${value?.column}, 0.95) as ${value.alias}`
-            );
-            break;
-          case "p99":
-            selectFields.push(
-              `approx_percentile_cont(${value?.column}, 0.99) as ${value.alias}`
-            );
-            break;
-          default:
-            selectFields.push(
-              `${value.aggregationFunction}(${value.column}) as ${value.alias}`
-            );
-            break;
-        }
-      }
-
-      // Adding the selected fields to the query
-      query += selectFields.join(", ");
-
-      query += ` FROM "${stream}"`;
-
-      // Adding filter conditions
-      const filterData = queryData.fields.filter || [];
-      const filterConditions = filterData.map((field: any) => {
-        let selectFilter = "";
-        if (field.type === "list" && field.values?.length > 0) {
-          selectFilter += `${field.column} IN (${field.values
-            .map((it: string) => `'${it}'`)
-            .join(", ")})`;
-        } else if (field.type === "condition" && field.operator != null) {
-          selectFilter += `${field.column} `;
-          if (["Is Null", "Is Not Null"].includes(field.operator)) {
-            selectFilter +=
-              field.operator === "Is Null" ? "IS NULL" : "IS NOT NULL";
-          } else if (field.value != null && field.value !== "") {
-            switch (field.operator) {
-              case "=":
-              case "<>":
-              case "<":
-              case ">":
-              case "<=":
-              case ">=":
-                selectFilter += `${field.operator} ${field.value}`;
-                break;
-              case "Contains":
-                selectFilter += `LIKE '%${field.value}%'`;
-                break;
-              case "Not Contains":
-                selectFilter += `NOT LIKE '%${field.value}%'`;
-                break;
-              default:
-                selectFilter += `${field.operator} ${field.value}`;
-                break;
-            }
-          }
-        }
-        return selectFilter;
-      });
-
-      // Adding filter conditions to the query
-      if (filterConditions.length > 0) {
-        query += " WHERE " + filterConditions.join(" AND ");
-      }
-
-      // Adding group by statement
-      if (source && target) {
-        query += ` GROUP BY ${source.alias}, ${target.alias}`;
-      }
-
-      // Adding sorting
-      const orderByArr: string[] = [];
-      [source, target, value].forEach((field) => {
-        if (field && field.sortBy) {
-          orderByArr.push(`${field.alias} ${field.sortBy}`);
-        }
-      });
-
-      if (orderByArr.length > 0) {
-        query += ` ORDER BY ${orderByArr.join(", ")}`;
-      }
-
-      // Adding limit
-      const queryLimit = queryData.config.limit ?? 0;
-      if (queryLimit > 0) {
-        query += ` LIMIT ${queryLimit}`;
-      }
-
-      return query;
-    };
-
-    const sqlchart = () => {
-      // STEP 1: first check if there is at least 1 field selected
+    onBeforeMount(() => {
       if (
-        dashboardPanelData.data.queries[
+        !dashboardPanelData.data.queries[
           dashboardPanelData.layout.currentQueryIndex
-        ].fields.x.length == 0 &&
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.y.length == 0 &&
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.z.length == 0
+        ].vrlFunctionQuery
       ) {
         dashboardPanelData.data.queries[
           dashboardPanelData.layout.currentQueryIndex
-        ].query = "";
-        return;
+        ].vrlFunctionQuery = "";
       }
-
-      // STEP 2: Now, continue if we have at least 1 field selected
-      // merge the fields list
-      let query = "SELECT ";
-      const fields = [
-        ...dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.x,
-        ...dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.y,
-        ...(dashboardPanelData.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields?.z
-          ? [
-              ...dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.z,
-            ]
-          : []),
-      ].flat();
-      const filter = [
-        ...dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields?.filter,
-      ];
-      const array = fields.map((field, i) => {
-        let selector = "";
-
-        // TODO: add aggregator
-        if (field?.aggregationFunction) {
-          switch (field?.aggregationFunction) {
-            case "count-distinct":
-              selector += `count(distinct(${field?.column}))`;
-              break;
-            case "p50":
-              selector += `approx_percentile_cont(${field?.column}, 0.5)`;
-              break;
-            case "p90":
-              selector += `approx_percentile_cont(${field?.column}, 0.9)`;
-              break;
-            case "p95":
-              selector += `approx_percentile_cont(${field?.column}, 0.95)`;
-              break;
-            case "p99":
-              selector += `approx_percentile_cont(${field?.column}, 0.99)`;
-              break;
-            case "histogram": {
-              // if inteval is not null, then use it
-              if (field?.args && field?.args?.length && field?.args[0].value) {
-                selector += `${field?.aggregationFunction}(${field?.column}, '${field?.args[0]?.value}')`;
-              } else {
-                selector += `${field?.aggregationFunction}(${field?.column})`;
-              }
-              break;
-            }
-            default:
-              selector += `${field?.aggregationFunction}(${field?.column})`;
-              break;
-          }
-        } else {
-          selector += `${field?.column}`;
-        }
-        selector += ` as "${field?.alias}"${
-          i == fields.length - 1 ? " " : ", "
-        }`;
-        return selector;
-      });
-      query += array?.join("");
-
-      // now add from stream name
-      query += ` FROM "${
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields?.stream
-      }" `;
-
-      const filterData = filter?.map((field, i) => {
-        let selectFilter = "";
-        if (field.type == "list" && field.values?.length > 0) {
-          selectFilter += `${field.column} IN (${field.values
-            .map((it) => `'${it}'`)
-            .join(", ")})`;
-        } else if (field.type == "condition" && field.operator != null) {
-          selectFilter += `${field?.column} `;
-          if (["Is Null", "Is Not Null"].includes(field.operator)) {
-            switch (field?.operator) {
-              case "Is Null":
-                selectFilter += `IS NULL`;
-                break;
-              case "Is Not Null":
-                selectFilter += `IS NOT NULL`;
-                break;
-            }
-          } else if (field.value != null && field.value != "") {
-            switch (field.operator) {
-              case "=":
-              case "<>":
-              case "<":
-              case ">":
-              case "<=":
-              case ">=":
-                selectFilter += `${field?.operator} ${field?.value}`;
-                break;
-              case "Contains":
-                selectFilter += `LIKE '%${field.value}%'`;
-                break;
-              case "Not Contains":
-                selectFilter += `NOT LIKE '%${field.value}%'`;
-                break;
-              default:
-                selectFilter += `${field.operator} ${field.value}`;
-                break;
-            }
-          }
-        }
-        return selectFilter;
-      });
-      const filterItems = filterData.filter((it: any) => it);
-      if (filterItems.length > 0) {
-        query += "WHERE " + filterItems.join(" AND ");
-      }
-
-      // add group by statement
-      const xAxisAlias = dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.x.map((it: any) => it?.alias);
-      const yAxisAlias = dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.y.map((it: any) => it?.alias);
-
-      if (dashboardPanelData.data.type == "heatmap") {
-        query +=
-          xAxisAlias.length && yAxisAlias.length
-            ? " GROUP BY " +
-              xAxisAlias.join(", ") +
-              ", " +
-              yAxisAlias.join(", ")
-            : "";
-      } else {
-        query += xAxisAlias.length ? " GROUP BY " + xAxisAlias.join(", ") : "";
-      }
-
-      // array of sorting fields with followed by asc or desc
-      const orderByArr = [];
-
-      fields.forEach((it: any) => {
-        // ignore if None is selected or sortBy is not there
-        if (it?.sortBy) {
-          orderByArr.push(`${it?.alias} ${it?.sortBy}`);
-        }
-      });
-
-      // append with query by joining array with comma
-      query += orderByArr.length ? " ORDER BY " + orderByArr.join(", ") : "";
-
-      // append limit
-      // if limit is less than or equal to 0 then don't add
-      const queryLimit =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].config.limit ?? 0;
-      query += queryLimit > 0 ? " LIMIT " + queryLimit : "";
-
-      return query;
-    };
-
-    watch(
-      () => [
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].query,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].customQuery,
-        dashboardPanelData.meta.stream.selectedStreamFields,
-      ],
-      async () => {
-        // Only continue if the current mode is "show custom query"
-        if (
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].customQuery &&
-          dashboardPanelData.data.queryType == "sql"
-        ) {
-          // Call the updateQueryValue function
-          if (parser) updateQueryValue();
-        } else {
-          // auto query mode selected
-          // remove the custom fields from the list
-          dashboardPanelData.meta.stream.customQueryFields = [];
-        }
-        // if (dashboardPanelData.data.queryType == "promql") {
-        //     updatePromQLQuery()
-        // }
-      },
-      { deep: true }
-    );
+    });
 
     // on queryerror change dispatch resize event to resize monaco editor
     watch(
@@ -820,118 +501,6 @@ export default defineComponent({
         window.dispatchEvent(new Event("resize"));
       }
     );
-
-    // This function parses the custom query and generates the errors and custom fields
-    const updateQueryValue = () => {
-      // store the query in the dashboard panel data
-      // dashboardPanelData.meta.editorValue = value;
-      // dashboardPanelData.data.query = value;
-
-      if (
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].customQuery &&
-        dashboardPanelData.data.queryType != "promql"
-      ) {
-        // empty the errors
-        dashboardPanelData.meta.errors.queryErrors = [];
-
-        // Get the parsed query
-        try {
-          let currentQuery = dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].query
-          
-           // replace variables with dummy values to verify query is correct or not
-          if(/\${[a-zA-Z0-9_-]+:csv}/.test(currentQuery)){
-            currentQuery = currentQuery.replaceAll(/\${[a-zA-Z0-9_-]+:csv}/g, "1,2")
-          }
-          if(/\${[a-zA-Z0-9_-]+:singlequote}/.test(currentQuery)){
-            currentQuery = currentQuery.replaceAll(/\${[a-zA-Z0-9_-]+:singlequote}/g, "'1','2'")
-          }
-          if(/\${[a-zA-Z0-9_-]+:doublequote}/.test(currentQuery)){
-            currentQuery = currentQuery.replaceAll(/\${[a-zA-Z0-9_-]+:doublequote}/g, '"1","2"')
-          }
-          if(/\${[a-zA-Z0-9_-]+:pipe}/.test(currentQuery)){
-            currentQuery = currentQuery.replaceAll(/\${[a-zA-Z0-9_-]+:pipe}/g, "1|2")
-          }
-          if(/\$(\w+|\{\w+\})/.test(currentQuery)){
-            currentQuery = currentQuery.replaceAll(/\$(\w+|\{\w+\})/g, "10")
-          }
-
-          dashboardPanelData.meta.parsedQuery = parser.astify(currentQuery);
-        } catch (e) {
-          // exit as there is an invalid query
-          dashboardPanelData.meta.errors.queryErrors.push("Invalid SQL Syntax");
-          return null;
-        }
-        if (!dashboardPanelData.meta.parsedQuery) {
-          return;
-        }
-
-        // We have the parsed query, now get the columns and tables
-        // get the columns first
-        if (
-          Array.isArray(dashboardPanelData.meta.parsedQuery?.columns) &&
-          dashboardPanelData.meta.parsedQuery?.columns?.length > 0
-        ) {
-          const oldCustomQueryFields = JSON.parse(
-            JSON.stringify(dashboardPanelData.meta.stream.customQueryFields)
-          );
-          dashboardPanelData.meta.stream.customQueryFields = [];
-          dashboardPanelData.meta.parsedQuery.columns.forEach(
-            (item: any, index: any) => {
-              let val;
-              // if there is a lable, use that, else leave it
-              if (item["as"] === undefined || item["as"] === null) {
-                val = item["expr"]["column"];
-              } else {
-                val = item["as"];
-              }
-              if (
-                !dashboardPanelData.meta.stream.customQueryFields.find(
-                  (it) => it.name == val
-                )
-              ) {
-                dashboardPanelData.meta.stream.customQueryFields.push({
-                  name: val,
-                  type: "",
-                });
-              }
-            }
-          );
-
-          // update the existing x and y axis fields
-          updateXYFieldsOnCustomQueryChange(oldCustomQueryFields);
-        } else {
-          dashboardPanelData.meta.errors.queryErrors.push("Invalid Columns");
-        }
-
-        // now check if the correct stream is selected
-        if (dashboardPanelData.meta.parsedQuery.from?.length > 0) {
-          const streamFound = dashboardPanelData.meta.stream.streamResults.find(
-            (it) => it.name == dashboardPanelData.meta.parsedQuery.from[0].table
-          );
-          if (streamFound) {
-            if (
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.stream != streamFound.name
-            ) {
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.stream = streamFound.name;
-            }
-          } else {
-            dashboardPanelData.meta.errors.queryErrors.push("Invalid stream");
-          }
-        } else {
-          dashboardPanelData.meta.errors.queryErrors.push(
-            "Stream name required"
-          );
-        }
-      }
-    };
 
     const updatePromQLQuery = async (event, value) => {
       autoCompleteData.value.query = value;
@@ -961,10 +530,27 @@ export default defineComponent({
       dashboardPanelData.meta.errors.queryErrors = [];
     };
 
+    const onFunctionToggle = (value, event) => {
+      event.stopPropagation();
+
+      // if value is false
+      if (!value) {
+        // hide function editor
+        splitterModel.value = 100;
+
+        // reset function query
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].vrlFunctionQuery = "";
+      }
+
+      // open query editor
+      dashboardPanelData.layout.showQueryBar = true;
+    };
+
     return {
       t,
       router,
-      updateQueryValue,
       updatePromQLQuery,
       onDropDownClick,
       promqlMode,
@@ -979,6 +565,16 @@ export default defineComponent({
       getSuggestions,
       queryEditorRef,
       updateQuery,
+      functionEditorPlaceholderFlag,
+      vrlFnEditorRef,
+      splitterModel,
+      getImageURL,
+      onFunctionToggle,
+      functionOptions,
+      selectedFunction,
+      filterFunctionOptions,
+      onFunctionSelect,
+      selectedStreamFieldsBasedOnUserDefinedSchema,
     };
   },
 });
@@ -994,6 +590,12 @@ export default defineComponent({
 .q-ml-sm:hover {
   background-color: #eaeaeaa5;
   border-radius: 50%;
+}
+
+:deep(.empty-function .monaco-editor-background) {
+  background-image: url("../../../assets/images/common/vrl-function.png");
+  background-repeat: no-repeat;
+  background-size: 170px;
 }
 
 // .query-tabs-container {

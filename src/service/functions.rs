@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -19,27 +19,25 @@ use actix_web::{
     http::{self, StatusCode},
     HttpResponse,
 };
-use config::meta::stream::StreamType;
+use config::{
+    meta::{
+        function::{FunctionList, TestVRLResponse, Transform, VRLResult, VRLResultResolver},
+        pipeline::{PipelineDependencyItem, PipelineDependencyResponse},
+    },
+    utils::json,
+};
 
 use crate::{
+    common,
     common::{
-        infra::config::STREAM_FUNCTIONS,
-        meta::{
-            authz::Authz,
-            functions::{
-                FunctionList, StreamFunctionsList, StreamOrder, StreamTransform, Transform,
-            },
-            http::HttpResponse as MetaHttpResponse,
-        },
+        meta::{authz::Authz, http::HttpResponse as MetaHttpResponse},
         utils::auth::{remove_ownership, set_ownership},
     },
-    service::{db, ingestion::compile_vrl_function},
+    service::{db, ingestion::compile_vrl_function, search::RESULT_ARRAY},
 };
 
 const FN_SUCCESS: &str = "Function saved successfully";
 const FN_NOT_FOUND: &str = "Function not found";
-const FN_ADDED: &str = "Function applied to stream";
-const FN_REMOVED: &str = "Function removed from stream";
 const FN_DELETED: &str = "Function deleted";
 const FN_ALREADY_EXIST: &str = "Function already exist";
 const FN_IN_USE: &str =
@@ -82,6 +80,115 @@ pub async fn save_function(org_id: String, mut func: Transform) -> Result<HttpRe
     }
 }
 
+#[tracing::instrument(skip(org_id, function))]
+pub async fn test_run_function(
+    org_id: &str,
+    mut function: String,
+    events: Vec<json::Value>,
+) -> Result<HttpResponse, anyhow::Error> {
+    // Append a dot at the end of the function if it doesn't exist
+    if !function.ends_with('.') {
+        function = format!("{} \n .", function);
+    }
+
+    let apply_over_hits = RESULT_ARRAY.is_match(&function);
+    if apply_over_hits {
+        function = RESULT_ARRAY.replace(&function, "").to_string();
+    }
+
+    let runtime_config = match compile_vrl_function(&function, org_id) {
+        Ok(program) => {
+            let registry = program
+                .config
+                .get_custom::<vector_enrichment::TableRegistry>()
+                .unwrap();
+            registry.finish_load();
+            program
+        }
+        Err(e) => {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                StatusCode::BAD_REQUEST.into(),
+                e.to_string(),
+            )))
+        }
+    };
+
+    let mut runtime = common::utils::functions::init_vrl_runtime();
+    let fields = runtime_config.fields;
+    let program = runtime_config.program;
+
+    let mut transformed_events = vec![];
+    if apply_over_hits {
+        let (ret_val, err) = crate::service::ingestion::apply_vrl_fn(
+            &mut runtime,
+            &VRLResultResolver {
+                program: program.clone(),
+                fields: fields.clone(),
+            },
+            json::Value::Array(events),
+            org_id,
+            &[String::new()],
+        );
+
+        if err.is_some() {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                StatusCode::BAD_REQUEST.into(),
+                err.unwrap(),
+            )));
+        }
+
+        ret_val
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| {
+                let flattened_array = v
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .map(|item| config::utils::flatten::flatten(item.clone()).unwrap())
+                    .collect::<Vec<_>>();
+                if flattened_array.is_empty() {
+                    return None;
+                }
+                Some(serde_json::Value::Array(flattened_array))
+            })
+            .for_each(|transform| {
+                transformed_events.push(VRLResult::new("", transform));
+            });
+    } else {
+        events.into_iter().for_each(|event| {
+            let (ret_val, err) = crate::service::ingestion::apply_vrl_fn(
+                &mut runtime,
+                &config::meta::function::VRLResultResolver {
+                    program: program.clone(),
+                    fields: fields.clone(),
+                },
+                event.clone(),
+                org_id,
+                &[String::new()],
+            );
+            if let Some(err) = err {
+                transformed_events.push(VRLResult::new(&err, event));
+                return;
+            }
+
+            let transform = if !ret_val.is_null() {
+                config::utils::flatten::flatten(ret_val).unwrap()
+            } else {
+                "".into()
+            };
+            transformed_events.push(VRLResult::new("", transform));
+        });
+    }
+
+    let results = TestVRLResponse {
+        results: transformed_events,
+    };
+
+    Ok(HttpResponse::Ok().json(results))
+}
+
 #[tracing::instrument(skip(func))]
 pub async fn update_function(
     org_id: &str,
@@ -101,10 +208,6 @@ pub async fn update_function(
         return Ok(HttpResponse::Ok().json(func));
     }
 
-    // UI mostly like in 1st version won't send streams, so we need to add them back
-    // from existing function
-    func.streams = existing_fn.streams;
-
     if !func.function.ends_with('.') {
         func.function = format!("{} \n .", func.function);
     }
@@ -117,6 +220,7 @@ pub async fn update_function(
         }
     }
     extract_num_args(&mut func);
+
     if let Err(error) = db::functions::set(org_id, &func.name, &func).await {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::message(
@@ -125,6 +229,26 @@ pub async fn update_function(
             )),
         );
     }
+
+    // update associated pipelines
+    if let Ok(associated_pipelines) = db::pipeline::list_by_org(org_id).await {
+        for pipeline in associated_pipelines {
+            if pipeline.contains_function(&func.name) {
+                if let Err(e) = db::pipeline::update(&pipeline, None).await {
+                    return Ok(HttpResponse::InternalServerError().json(
+                        MetaHttpResponse::message(
+                            http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+                            format!(
+                                "Failed to update associated pipeline({}/{}): {}",
+                                pipeline.id, pipeline.name, e
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
         http::StatusCode::OK.into(),
         FN_SUCCESS.to_string(),
@@ -168,6 +292,8 @@ pub async fn delete_function(org_id: String, fn_name: String) -> Result<HttpResp
             )));
         }
     };
+    // TODO(taiming): Function Stream Association to be deprecated starting v0.13.1.
+    // remove this check after migrating functions to its dedicated table
     if let Some(val) = existing_fn.streams {
         if !val.is_empty() {
             let names = val
@@ -189,6 +315,19 @@ pub async fn delete_function(org_id: String, fn_name: String) -> Result<HttpResp
             }
         }
     }
+    let pipeline_dep = get_dependencies(&org_id, &fn_name).await;
+    if !pipeline_dep.is_empty() {
+        let pipeline_data = serde_json::to_string(&pipeline_dep).unwrap_or("[]".to_string());
+        return Ok(HttpResponse::Conflict().json(MetaHttpResponse::error(
+            http::StatusCode::CONFLICT.into(),
+            format!(
+                "Warning: Function '{}' has {} pipeline dependencies. Please remove these pipelines first: {}",
+                fn_name,
+                pipeline_dep.len(),
+                pipeline_data
+            ),
+        )));
+    }
     let result = db::functions::delete(&org_id, &fn_name).await;
     match result {
         Ok(_) => {
@@ -206,113 +345,27 @@ pub async fn delete_function(org_id: String, fn_name: String) -> Result<HttpResp
     }
 }
 
-pub async fn list_stream_functions(
+pub async fn get_pipeline_dependencies(
     org_id: &str,
-    stream_type: StreamType,
-    stream_name: &str,
+    func_name: &str,
 ) -> Result<HttpResponse, Error> {
-    if let Some(val) = STREAM_FUNCTIONS.get(&format!("{}/{}/{}", org_id, stream_type, stream_name))
-    {
-        Ok(HttpResponse::Ok().json(val.value()))
-    } else {
-        Ok(HttpResponse::Ok().json(StreamFunctionsList { list: vec![] }))
-    }
+    let list = get_dependencies(org_id, func_name).await;
+    Ok(HttpResponse::Ok().json(PipelineDependencyResponse { list }))
 }
 
-pub async fn delete_stream_function(
-    org_id: &str,
-    _stream_type: StreamType,
-    stream_name: &str,
-    fn_name: &str,
-) -> Result<HttpResponse, Error> {
-    let mut existing_fn = match check_existing_fn(org_id, fn_name).await {
-        Some(function) => function,
-        None => {
-            return Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                StatusCode::NOT_FOUND.into(),
-                FN_NOT_FOUND.to_string(),
-            )));
-        }
-    };
-
-    if let Some(ref mut val) = existing_fn.streams {
-        for stream in val.iter_mut() {
-            if stream.stream == stream_name {
-                stream.is_removed = true;
-                stream.order = 0;
-                break;
-            }
-        }
-        if let Err(error) = db::functions::set(org_id, fn_name, &existing_fn).await {
-            Ok(
-                HttpResponse::InternalServerError().json(MetaHttpResponse::message(
-                    http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-                    error.to_string(),
-                )),
-            )
-        } else {
-            // can't be removed from watcher of function as stream name & type won't be
-            // available , hence being removed here
-            // let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
-            // remove_stream_fn_from_cache(&key, fn_name);
-            Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-                http::StatusCode::OK.into(),
-                FN_REMOVED.to_string(),
-            )))
-        }
-    } else {
-        Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            StatusCode::NOT_FOUND.into(),
-            FN_NOT_FOUND.to_string(),
-        )))
-    }
-}
-
-pub async fn add_function_to_stream(
-    org_id: &str,
-    stream_type: StreamType,
-    stream_name: &str,
-    fn_name: &str,
-    mut stream_order: StreamOrder,
-) -> Result<HttpResponse, Error> {
-    let mut existing_fn = match check_existing_fn(org_id, fn_name).await {
-        Some(function) => function,
-        None => {
-            return Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                StatusCode::NOT_FOUND.into(),
-                FN_NOT_FOUND.to_string(),
-            )));
-        }
-    };
-
-    stream_order.stream = stream_name.to_owned();
-    stream_order.stream_type = stream_type;
-
-    if let Some(mut val) = existing_fn.streams {
-        if let Some(existing) = val.iter_mut().find(|x| x.stream == stream_order.stream) {
-            existing.is_removed = false;
-            existing.order = stream_order.order;
-        } else {
-            val.push(stream_order);
-        }
-        existing_fn.streams = Some(val);
-    } else {
-        existing_fn.streams = Some(vec![stream_order]);
-    }
-
-    if let Err(error) = db::functions::set(org_id, fn_name, &existing_fn).await {
-        Ok(
-            HttpResponse::InternalServerError().json(MetaHttpResponse::message(
-                http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-                error.to_string(),
-            )),
-        )
-    } else {
-        Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-            http::StatusCode::OK.into(),
-            FN_ADDED.to_string(),
-        )))
-    }
+async fn get_dependencies(org_id: &str, func_name: &str) -> Vec<PipelineDependencyItem> {
+    db::pipeline::list_by_org(org_id)
+        .await
+        .map_or(vec![], |mut pipelines| {
+            pipelines.retain(|pl| pl.contains_function(func_name));
+            pipelines
+                .into_iter()
+                .map(|pl| PipelineDependencyItem {
+                    id: pl.id,
+                    name: pl.name,
+                })
+                .collect()
+        })
 }
 
 fn extract_num_args(func: &mut Transform) {
@@ -339,24 +392,11 @@ async fn check_existing_fn(org_id: &str, fn_name: &str) -> Option<Transform> {
     }
 }
 
-fn _remove_stream_fn_from_cache(key: &str, fn_name: &str) {
-    if let Some(val) = STREAM_FUNCTIONS.clone().get(key) {
-        if val.list.len() > 1 {
-            let final_list = val
-                .clone()
-                .list
-                .into_iter()
-                .filter(|x| x.transform.name != fn_name)
-                .collect::<Vec<StreamTransform>>();
-            STREAM_FUNCTIONS.insert(key.to_string(), StreamFunctionsList { list: final_list });
-        } else {
-            STREAM_FUNCTIONS.remove(key);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use actix_http::body::to_bytes;
+    use config::meta::{function::StreamOrder, stream::StreamType};
+
     use super::*;
 
     #[tokio::test]
@@ -382,6 +422,7 @@ mod tests {
                 stream_type: StreamType::Logs,
                 order: 0,
                 is_removed: false,
+                apply_before_flattening: false,
             }]),
         };
 
@@ -398,10 +439,43 @@ mod tests {
         let list_resp = list_functions("nexus".to_string(), None).await;
         assert!(list_resp.is_ok());
 
-        assert!(
-            delete_function("nexus".to_string(), "dummyfn".to_owned())
-                .await
-                .is_ok()
+        assert!(delete_function("nexus".to_string(), "dummyfn".to_owned())
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_test_function_processing() {
+        use serde_json::json;
+
+        let org_id = "test_org";
+        let function = r#"
+        . = {
+            "new_field": "new_value",
+            "nested": {
+                "key": 42
+            }
+        }
+        .
+    "#
+        .to_string();
+
+        let events = vec![json!({
+            "original_field": "original_value"
+        })];
+
+        let response = test_run_function(org_id, function, events).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let body: TestVRLResponse =
+            serde_json::from_slice(&*to_bytes(response.into_body()).await.unwrap()).unwrap();
+
+        // Validate transformed events
+        assert_eq!(body.results.len(), 1);
+        assert_eq!(body.results[0].message, "");
+        assert_eq!(
+            body.results[0].event,
+            json! {{"nested_key":42,"new_field":"new_value"}}
         );
     }
 }

@@ -1,7 +1,10 @@
 <template>
-  <q-card class="column full-height no-wrap">
+  <q-card
+    class="column full-height no-wrap"
+    style="min-width: 480px; max-width: 800px"
+  >
     <!-- Header -->
-    <div style="width: 40vw" class="q-px-sm q-py-md">
+    <div class="q-px-sm q-py-md">
       <q-card-section class="q-pb-sm q-px-sm q-pt-none">
         <div class="row items-center no-wrap">
           <div class="col">
@@ -44,8 +47,9 @@
 <script lang="ts">
 import { defineComponent, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { timestampToTimezoneDate } from "@/utils/zincutils";
+import { timestampToTimezoneDate, durationFormatter } from "@/utils/zincutils";
 import { useStore } from "vuex";
+import { getUnitValue } from "@/utils/dashboard/convertDataIntoUnitValue";
 
 export default defineComponent({
   name: "QueryList",
@@ -63,7 +67,7 @@ export default defineComponent({
       const formattedStartTime = timestampToTimezoneDate(
         timestampOfStartTime / 1000,
         store.state.timezone,
-        "yyyy-MM-dd HH:mm:ss"
+        "yyyy-MM-dd HH:mm:ss",
       );
       const startTimeEntry = `${formattedStartTime} ${store.state.timezone} (${timestampOfStartTime})`;
 
@@ -71,7 +75,7 @@ export default defineComponent({
       const formattedEndTime = timestampToTimezoneDate(
         timestampOfEndTime / 1000,
         store.state.timezone,
-        "yyyy-MM-dd HH:mm:ss"
+        "yyyy-MM-dd HH:mm:ss",
       );
       const endTimeEntry = `${formattedEndTime} ${store.state.timezone} (${timestampOfEndTime})`;
 
@@ -90,46 +94,29 @@ export default defineComponent({
 
       const getDuration = (createdAt: number) => {
         const currentTime = localTimeToMicroseconds();
-
         const durationInSeconds = Math.floor(
-          (currentTime - createdAt) / 1000000
+          (currentTime - createdAt) / 1000000,
         );
 
-        let formattedDuration;
-        if (durationInSeconds < 0) {
-          formattedDuration = "Invalid duration";
-        } else if (durationInSeconds < 60) {
-          formattedDuration = `${durationInSeconds}s`;
-        } else if (durationInSeconds < 3600) {
-          const minutes = Math.floor(durationInSeconds / 60);
-          formattedDuration = `${minutes}m`;
-        } else {
-          const hours = Math.floor(durationInSeconds / 3600);
-          formattedDuration = `${hours}h`;
-        }
-
-        return formattedDuration;
+        return durationFormatter(durationInSeconds);
       };
 
       //different between start and end time to show in UI as queryRange
       const queryRange = (startTime: number, endTime: number) => {
         const queryDuration = Math.floor((endTime - startTime) / 1000000);
-        let formattedDuration;
-        if (queryDuration < 0) {
-          formattedDuration = "Invalid duration";
-        } else if (queryDuration < 60) {
-          formattedDuration = `${queryDuration}s`;
-        } else if (queryDuration < 3600) {
-          const minutes = Math.floor(queryDuration / 60);
-          formattedDuration = `${minutes}m`;
-        } else {
-          const hours = Math.floor(queryDuration / 3600);
-          formattedDuration = `${hours}h`;
-        }
 
-        return formattedDuration;
+        return durationFormatter(queryDuration);
       };
 
+      const originalSize =
+        query?.original_size !== undefined
+          ? getUnitValue(query?.original_size, "megabytes", "", 2)
+          : { value: "", unit: "" };
+
+      const compressedSize =
+        query?.compressed_size !== undefined
+          ? getUnitValue(query?.compressed_size, "megabytes", "", 2)
+          : { value: "", unit: "" };
       const rows: any[] = [
         ["Trace ID", query?.trace_id],
         ["Status", query?.status],
@@ -143,13 +130,23 @@ export default defineComponent({
         ["Query Range", queryRange(query?.start_time, query?.end_time)],
         ["Scan Records", query?.records],
         ["Files", query?.files],
-        ["Original Size", query?.original_size],
-        ["Compressed Size", query?.compressed_size],
+        [
+          "Original Size",
+          originalSize.value
+            ? `${originalSize.value} ${originalSize.unit}`
+            : "",
+        ],
+        [
+          "Compressed Size",
+          compressedSize.value
+            ? `${compressedSize.value} ${compressedSize.unit}`
+            : "",
+        ],
       ];
-      
+
       return rows;
     };
-    
+
     return {
       queryData,
       t,

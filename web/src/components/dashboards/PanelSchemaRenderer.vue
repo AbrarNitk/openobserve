@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,10 +16,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <template>
   <div style="width: 100%; height: 100%" @mouseleave="hideDrilldownPopUp">
-    <div ref="chartPanelRef" style="height: 100%; position: relative">
-      <div v-if="!errorDetail" style="height: 100%; width: 100%">
+    <div
+      ref="chartPanelRef"
+      style="height: 100%; position: relative"
+      :class="chartPanelClass"
+    >
+      <div
+        v-if="!errorDetail"
+        :style="{ height: chartPanelHeight, width: '100%' }"
+      >
+        <MapsRenderer
+          v-if="panelSchema.type == 'maps'"
+          :data="panelData.chartType == 'maps' ? panelData : { options: {} }"
+        ></MapsRenderer>
         <GeoMapRenderer
-          v-if="panelSchema.type == 'geomap'"
+          v-else-if="panelSchema.type == 'geomap'"
           :data="
             panelData.chartType == 'geomap'
               ? panelData
@@ -33,6 +44,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               ? panelData
               : { options: { backgroundColor: 'transparent' } }
           "
+          :value-mapping="panelSchema?.config?.mappings ?? []"
           @row-click="onChartClick"
           ref="tableRendererRef"
           :wrap-cells="panelSchema.config?.wrap_table_cells"
@@ -66,7 +78,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             (data.length &&
               data[0]?.length &&
               panelData.chartType != 'geomap' &&
-              panelData.chartType != 'table')
+              panelData.chartType != 'table' &&
+              panelData.chartType != 'maps')
               ? panelData
               : { options: { backgroundColor: 'transparent' } }
           "
@@ -75,7 +88,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           @click="onChartClick"
         />
       </div>
-      <div v-if="!errorDetail" class="noData" data-test="no-data">
+      <div
+        v-if="
+          !errorDetail &&
+          panelSchema.type != 'geomap' &&
+          panelSchema.type != 'maps'
+        "
+        class="noData"
+        data-test="no-data"
+      >
         {{ noData }}
       </div>
       <div
@@ -161,8 +182,14 @@ import {
 import { useStore } from "vuex";
 import { usePanelDataLoader } from "@/composables/dashboard/usePanelDataLoader";
 import { convertPanelData } from "@/utils/dashboard/convertPanelData";
-import { getAllDashboardsByFolderId, getFoldersList } from "@/utils/commons";
+import { getAllDashboardsByFolderId, getDashboard, getFoldersList } from "@/utils/commons";
 import { useRoute, useRouter } from "vue-router";
+import { onUnmounted } from "vue";
+import { b64EncodeUnicode } from "@/utils/zincutils";
+import { generateDurationLabel } from "../../utils/date";
+import { onBeforeMount } from "vue";
+import { useLoading } from "@/composables/useLoading";
+import useNotifications from "@/composables/useNotifications";
 
 const ChartRenderer = defineAsyncComponent(() => {
   return import("@/components/dashboards/panels/ChartRenderer.vue");
@@ -174,6 +201,10 @@ const TableRenderer = defineAsyncComponent(() => {
 
 const GeoMapRenderer = defineAsyncComponent(() => {
   return import("@/components/dashboards/panels/GeoMapRenderer.vue");
+});
+
+const MapsRenderer = defineAsyncComponent(() => {
+  return import("@/components/dashboards/panels/MapsRenderer.vue");
 });
 
 const HTMLRenderer = defineAsyncComponent(() => {
@@ -190,6 +221,7 @@ export default defineComponent({
     ChartRenderer,
     TableRenderer,
     GeoMapRenderer,
+    MapsRenderer,
     HTMLRenderer,
     MarkdownRenderer,
   },
@@ -215,13 +247,31 @@ export default defineComponent({
       default: null,
       type: String || null,
     },
+    dashboardId: {
+      default: "",
+      required: false,
+      type: String,
+    },
+    folderId: {
+      default: "",
+      required: false,
+      type: String,
+    },
+    reportId: {
+      default: "",
+      required: false,
+      type: String,
+    },
   },
   emits: [
     "updated:data-zoom",
     "error",
     "metadata-update",
     "result-metadata-update",
+    "last-triggered-at-update",
+    "is-cached-data-differ-with-current-time-range-update",
     "update:initialVariableValues",
+    "updated:vrlFunctionFieldList",
   ],
   setup(props, { emit }) {
     const store = useStore();
@@ -233,6 +283,10 @@ export default defineComponent({
     const chartPanelRef: any = ref(null); // holds the ref to the whole div
     const drilldownArray: any = ref([]);
     const drilldownPopUpRef: any = ref(null);
+    const chartPanelStyle = ref({
+      height: "100%",
+      width: "100%",
+    });
 
     // get refs from props
     const {
@@ -241,17 +295,31 @@ export default defineComponent({
       variablesData,
       forceLoad,
       searchType,
+      dashboardId,
+      folderId,
+      reportId,
     } = toRefs(props);
     // calls the apis to get the data based on the panel config
-    let { data, loading, errorDetail, metadata, resultMetaData } =
-      usePanelDataLoader(
-        panelSchema,
-        selectedTimeObj,
-        variablesData,
-        chartPanelRef,
-        forceLoad,
-        searchType
-      );
+    let {
+      data,
+      loading,
+      errorDetail,
+      metadata,
+      resultMetaData,
+      lastTriggeredAt,
+      isCachedDataDifferWithCurrentTimeRange,
+      searchRequestTraceIds,
+    } = usePanelDataLoader(
+      panelSchema,
+      selectedTimeObj,
+      variablesData,
+      chartPanelRef,
+      forceLoad,
+      searchType,
+      dashboardId,
+      folderId,
+      reportId,
+    );
 
     // need tableRendererRef to access downloadTableAsCSV method
     const tableRendererRef = ref(null);
@@ -266,7 +334,7 @@ export default defineComponent({
     // default values will be empty object of panels and variablesData
     const variablesAndPanelsDataLoadingState: any = inject(
       "variablesAndPanelsDataLoadingState",
-      { panels: {}, variablesData: {} }
+      { panels: {}, variablesData: {}, searchRequestTraceIds: {} },
     );
 
     // on loading state change, update the loading state of the panels in variablesAndPanelsDataLoadingState
@@ -279,12 +347,58 @@ export default defineComponent({
         };
       }
     });
-
+    //watch trace id and add in the searchRequestTraceIds
+    watch(searchRequestTraceIds, (updatedSearchRequestTraceIds) => {
+      if (variablesAndPanelsDataLoadingState) {
+        variablesAndPanelsDataLoadingState.searchRequestTraceIds = {
+          ...variablesAndPanelsDataLoadingState?.searchRequestTraceIds,
+          [panelSchema?.value?.id]: updatedSearchRequestTraceIds,
+        };
+      }
+    });
     // ======= [END] dashboard PrintMode =======
 
+    // When switching of tab was done, reset the loading state of the panels in variablesAndPanelsDataLoadingState
+    // As some panels were getting true cancel button and datetime picker were not getting updated
+    onUnmounted(() => {
+      if (variablesAndPanelsDataLoadingState) {
+        variablesAndPanelsDataLoadingState.searchRequestTraceIds = {
+          ...variablesAndPanelsDataLoadingState?.searchRequestTraceIds,
+          [panelSchema?.value?.id]: [],
+        };
+        variablesAndPanelsDataLoadingState.panels = {
+          ...variablesAndPanelsDataLoadingState?.panels,
+          [panelSchema?.value?.id]: false,
+        };
+      }
+    });
     watch(
       [data, store?.state],
       async () => {
+        // emit vrl function field list
+        if (data.value?.length && data.value[0] && data.value[0].length) {
+          // Find the index of the record with max attributes
+          const maxAttributesIndex = data.value[0].reduce(
+            (
+              maxIndex: string | number | any,
+              obj: {},
+              currentIndex: any,
+              array: Array<Record<string, unknown>>,
+            ) => {
+              const numAttributes = Object.keys(obj).length;
+              const maxNumAttributes = Object.keys(array[maxIndex]).length;
+              return numAttributes > maxNumAttributes ? currentIndex : maxIndex;
+            },
+            0,
+          );
+
+          const recordwithMaxAttribute = data.value[0][maxAttributesIndex];
+
+          const responseFields = Object.keys(recordwithMaxAttribute);
+
+          emit("updated:vrlFunctionFieldList", responseFields);
+        }
+
         // panelData.value = convertPanelData(panelSchema.value, data.value, store);
         if (!errorDetail.value) {
           try {
@@ -296,11 +410,14 @@ export default defineComponent({
               chartPanelRef,
               hoveredSeriesState,
               resultMetaData,
-              metadata.value
+              metadata.value,
+              chartPanelStyle.value,
             );
 
             errorDetail.value = "";
           } catch (error: any) {
+            console.error("error", error);
+            
             errorDetail.value = error.message;
           }
         } else {
@@ -312,33 +429,44 @@ export default defineComponent({
             panelSchema.value?.error_config?.default_data_on_error
           ) {
             data.value = JSON.parse(
-              panelSchema.value?.error_config?.default_data_on_error
+              panelSchema.value?.error_config?.default_data_on_error,
             );
             errorDetail.value = "";
           }
         }
       },
-      { deep: true }
+      { deep: true },
     );
 
     // when we get the new metadata from the apis, emit the metadata update
-    watch(metadata, () => {
-      emit("metadata-update", metadata.value);
+    watch(
+      metadata,
+      () => {
+        emit("metadata-update", metadata.value);
+      },
+      { deep: true },
+    );
+
+    watch(lastTriggeredAt, () => {
+      emit("last-triggered-at-update", lastTriggeredAt.value);
     });
 
-    watch(resultMetaData, () => {
-      emit("result-metadata-update", resultMetaData.value);
+    watch(isCachedDataDifferWithCurrentTimeRange, () => {
+      emit(
+        "is-cached-data-differ-with-current-time-range-update",
+        isCachedDataDifferWithCurrentTimeRange.value,
+      );
     });
 
     const handleNoData = (panelType: any) => {
       const xAlias = panelSchema.value.queries[0].fields.x.map(
-        (it: any) => it.alias
+        (it: any) => it.alias || [],
       );
       const yAlias = panelSchema.value.queries[0].fields.y.map(
-        (it: any) => it.alias
+        (it: any) => it.alias || [],
       );
       const zAlias = panelSchema.value.queries[0].fields.z.map(
-        (it: any) => it.alias
+        (it: any) => it.alias || [],
       );
 
       switch (panelType) {
@@ -366,7 +494,7 @@ export default defineComponent({
             data.value[0]?.length > 1 ||
             yAlias.every(
               (y: any) =>
-                data.value[0][0][y] != null || data.value[0][0][y] === 0
+                data.value[0][0][y] != null || data.value[0][0][y] === 0,
             )
           );
         }
@@ -377,6 +505,17 @@ export default defineComponent({
               yAlias.every((y: any) => data.value[0][0][y] != null) &&
               zAlias.every((z: any) => data.value[0][0][z]) != null)
           );
+        }
+        case "pie":
+        case "donut": {
+          return (
+            data.value[0]?.length > 1 ||
+            yAlias.every((y: any) => data.value[0][0][y] != null)
+          );
+        }
+        case "maps":
+        case "geomap": {
+          return true;
         }
         case "sankey": {
           const source = panelSchema.value.queries[0].fields.source.alias;
@@ -406,7 +545,7 @@ export default defineComponent({
       // Check if the queryType is 'promql'
       else if (panelSchema.value?.queryType == "promql") {
         // Check if the 'data' array has elements and every item has a non-empty 'result' array
-        return data.value.length &&
+        return data.value?.length &&
           data.value.some((item: any) => item?.result?.length)
           ? "" // Return an empty string if there is data
           : "No Data"; // Return "No Data" if there is no data
@@ -421,7 +560,7 @@ export default defineComponent({
     });
 
     // when the error changes, emit the error
-    watch(errorDetail, () => {
+    watch(errorDetail, () => {      
       //check if there is an error message or not
       if (!errorDetail.value) return;
       emit("error", errorDetail);
@@ -538,10 +677,128 @@ export default defineComponent({
         hideDrilldownPopUp();
       }
     };
+    
+    const { showErrorNotification } = useNotifications();
 
+    let parser: any;
+    onBeforeMount(async () => {
+      await importSqlParser();
+    });
+
+    const importSqlParser = async () => {
+      const useSqlParser: any = await import("@/composables/useParser");
+      const { sqlParser }: any = useSqlParser.default();
+      parser = await sqlParser();
+    };
+
+    // get interval from resultMetaData if it exists
+    const interval = computed(
+      () => resultMetaData?.value?.[0]?.histogram_interval,
+    );
+
+    // get interval in micro seconds
+    const intervalMicro = computed(() => interval.value * 1000 * 1000);
+
+    watch(
+      () => resultMetaData.value,
+      (newVal) => {
+        emit("result-metadata-update", newVal);
+      },
+      { deep: true },
+    );
+
+    const getOriginalQueryAndStream = (queryDetails: any, metadata: any) => {
+      const originalQuery = metadata?.value?.queries[0]?.query;
+      const streamName = queryDetails?.queries[0]?.fields?.stream;
+
+      if (!originalQuery || !streamName) {
+        console.error("Missing query or stream name.");
+        return null;
+      }
+
+      return { originalQuery, streamName };
+    };
+
+    const calculateTimeRange = (
+      hoveredTimestamp: number | null,
+      interval: number | undefined,
+    ) => {
+      if (interval && hoveredTimestamp) {
+        const startTime = hoveredTimestamp * 1000; // Convert to microseconds
+        return {
+          startTime,
+          endTime: startTime + interval,
+        };
+      }
+      return {
+        startTime: selectedTimeObj.value.start_time.getTime(),
+        endTime: selectedTimeObj.value.end_time.getTime(),
+      };
+    };
+
+    const parseQuery = async (originalQuery: string, parser: any) => {
+      try {
+        return parser.astify(originalQuery);
+      } catch (error) {
+        console.error("Failed to parse query:", error);
+        return null;
+      }
+    };
+
+    const buildWhereClause = (
+      ast: any,
+      breakdownColumn?: string,
+      breakdownValue?: string,
+    ): string => {
+      let whereClause = ast?.where
+        ? parser
+            .sqlify({ type: "select", where: ast.where })
+            .slice("SELECT".length)
+        : "";
+
+      if (breakdownColumn && breakdownValue) {
+        const breakdownCondition = `${breakdownColumn} = '${breakdownValue}'`;
+        whereClause += whereClause
+          ? ` AND ${breakdownCondition}`
+          : ` WHERE ${breakdownCondition}`;
+      }
+
+      return whereClause;
+    };
+
+    const constructLogsUrl = (
+      streamName: string,
+      calculatedTimeRange: { startTime: number; endTime: number },
+      encodedQuery: string,
+      queryDetails: any,
+      currentUrl: string,
+    ) => {
+      const logsUrl = new URL(currentUrl + "/logs");
+      logsUrl.searchParams.set(
+        "stream_type",
+        queryDetails.queries[0]?.fields?.stream_type,
+      );
+      logsUrl.searchParams.set("stream", streamName);
+      logsUrl.searchParams.set(
+        "from",
+        calculatedTimeRange.startTime.toString(),
+      );
+      logsUrl.searchParams.set("to", calculatedTimeRange.endTime.toString());
+      logsUrl.searchParams.set("sql_mode", "true");
+      logsUrl.searchParams.set("query", encodedQuery);
+      logsUrl.searchParams.set(
+        "org_identifier",
+        store.state.selectedOrganization.identifier,
+      );
+      logsUrl.searchParams.set("quick_mode", "false");
+      logsUrl.searchParams.set("show_histogram", "false");
+
+      return logsUrl;
+    };
     const openDrilldown = async (index: any) => {
       // hide the drilldown pop up
       hideDrilldownPopUp();
+
       // if panelSchema exists
       if (panelSchema.value) {
         // check if drilldown data exists
@@ -555,10 +812,125 @@ export default defineComponent({
         // find drilldown data
         const drilldownData = panelSchema.value.config.drilldown[index];
 
+        const navigateToLogs = async () => {
+          const queryDetails = panelSchema.value;
+          if (!queryDetails) {
+            console.error("Panel schema is undefined.");
+            return;
+          }
+
+          const { originalQuery, streamName } =
+            getOriginalQueryAndStream(queryDetails, metadata) || {};
+          if (!originalQuery || !streamName) return;
+
+          const hoveredTime = drilldownParams[0]?.value?.[0];
+          const hoveredTimestamp = hoveredTime
+            ? new Date(hoveredTime).getTime()
+            : null;
+          const breakdown = queryDetails.queries[0].fields?.breakdown || [];
+
+          const calculatedTimeRange = calculateTimeRange(
+            hoveredTimestamp,
+            intervalMicro.value,
+          );
+
+          if (!parser) {
+            await importSqlParser();
+          }
+          
+          const ast = await parseQuery(originalQuery, parser);
+          if (!ast) return;
+          
+          const tableAliases = ast.from
+            ?.filter((fromEntry: any) => fromEntry.as)
+            .map((fromEntry: any) => fromEntry.as);
+
+          const aliasClause = tableAliases?.length
+            ? ` AS ${tableAliases.join(", ")}`
+            : "";
+            
+          const breakdownColumn = breakdown[0]?.column;
+          const breakdownValue = drilldownParams[0]?.seriesName;
+          const whereClause = buildWhereClause(
+            ast,
+            breakdownColumn,
+            breakdownValue,
+          );
+
+          let modifiedQuery =
+            drilldownData.data.logsMode === "auto"
+              ? `SELECT * FROM "${streamName}"${aliasClause} ${whereClause}`
+              : drilldownData.data.logsQuery;
+
+          modifiedQuery = modifiedQuery.replace(/`/g, '"');
+
+          const encodedQuery: any = b64EncodeUnicode(modifiedQuery);
+
+          const pos = window.location.pathname.indexOf("/web/");
+          const currentUrl =
+            pos > -1
+              ? window.location.origin +
+                window.location.pathname.slice(0, pos) +
+                "/web"
+              : window.location.origin;
+
+          const logsUrl = constructLogsUrl(
+            streamName,
+            calculatedTimeRange,
+            encodedQuery,
+            queryDetails,
+            currentUrl,
+          );
+
+          try {
+            if (drilldownData.targetBlank) {
+              window.open(logsUrl.toString(), "_blank");
+            } else {
+              await router.push({
+                path: "/logs",
+                query: Object.fromEntries(logsUrl.searchParams.entries()),
+              });
+            }
+          } catch (error) {
+            console.error("Failed to navigate to logs:", error);
+          }
+        };
+
         // need to change dynamic variables to it's value using current variables, current chart data(params)
         // if pie, donut or heatmap then series name will come in name field
         // also, if value is an array, then last value will be taken
         const drilldownVariables: any = {};
+
+        // selected start time and end time
+        if (
+          selectedTimeObj?.value?.start_time &&
+          selectedTimeObj?.value?.start_time != "Invalid Date"
+        ) {
+          drilldownVariables.start_time = new Date(
+            selectedTimeObj?.value?.start_time?.toISOString(),
+          ).getTime();
+        }
+
+        if (
+          selectedTimeObj?.value?.end_time &&
+          selectedTimeObj?.value?.end_time != "Invalid Date"
+        ) {
+          drilldownVariables.end_time = new Date(
+            selectedTimeObj?.value?.end_time?.toISOString(),
+          ).getTime();
+        }
+
+        // param to pass current query
+        // use metadata query[replaced variables values] or panelSchema query
+        drilldownVariables.query =
+          metadata?.value?.queries[0]?.query ??
+          panelSchema?.value?.queries[0]?.query ??
+          "";
+        drilldownVariables.query_encoded = b64EncodeUnicode(
+          metadata?.value?.queries[0]?.query ??
+            panelSchema?.value?.queries[0]?.query ??
+            "",
+        );
 
         // if chart type is 'table' then we need to pass the table name
         if (panelSchema.value.type == "table") {
@@ -609,7 +981,7 @@ export default defineComponent({
           };
         }
 
-        variablesData.value.values.forEach((variable: any) => {
+        variablesData?.value?.values?.forEach((variable: any) => {
           if (variable.type != "dynamic_filters") {
             drilldownVariables[variable.name] = variable.value;
           }
@@ -621,9 +993,15 @@ export default defineComponent({
             // open url
             return window.open(
               replacePlaceholders(drilldownData.data.url, drilldownVariables),
-              drilldownData.targetBlank ? "_blank" : "_self"
+              drilldownData.targetBlank ? "_blank" : "_self",
             );
           } catch (error) {}
+        } else if (drilldownData.type == "logs") {
+          try {
+            navigateToLogs();
+          } catch (error) {
+            showErrorNotification("Failed to navigate to logs",)
+          }
         } else if (drilldownData.type == "byDashboard") {
           // we have folder, dashboard and tabs name
           // so we have to get id of folder, dashboard and tab
@@ -637,30 +1015,38 @@ export default defineComponent({
             await getFoldersList(store);
           }
           const folderId = store.state.organizationData.folders.find(
-            (folder: any) => folder.name == drilldownData.data.folder
+            (folder: any) => folder.name == drilldownData.data.folder,
           )?.folderId;
 
           if (!folderId) {
+            console.error(`Folder "${drilldownData.data.folder}" not found`);
             return;
           }
 
           // get dashboard id
           const allDashboardData = await getAllDashboardsByFolderId(
             store,
-            folderId
-          );
-          const dashboardData = allDashboardData.find(
-            (dashboard: any) => dashboard.title == drilldownData.data.dashboard
+            folderId,
           );
 
+          const dashboardId = allDashboardData?.find(
+            (dashboard: any) =>
+              dashboard.title === drilldownData.data.dashboard
+          )?.dashboardId;
+
+          const dashboardData = await getDashboard(store, dashboardId, folderId);
+
           if (!dashboardData) {
+            console.error(
+              `Dashboard "${drilldownData.data.dashboard}" not found in folder "${drilldownData.data.folder}"`,
+            );
             return;
           }
 
           // get tab id
           const tabId =
             dashboardData.tabs.find(
-              (tab: any) => tab.name == drilldownData.data.tab
+              (tab: any) => tab.name == drilldownData.data.tab,
             )?.tabId ?? dashboardData.tabs[0].tabId;
 
           // if targetBlank is true then create new url
@@ -693,7 +1079,7 @@ export default defineComponent({
                 url.searchParams.set(
                   "var-" +
                     replacePlaceholders(variable.name, drilldownVariables),
-                  replacePlaceholders(variable.value, drilldownVariables)
+                  replacePlaceholders(variable.value, drilldownVariables),
                 );
               }
             });
@@ -750,11 +1136,36 @@ export default defineComponent({
       }
     };
 
+    const chartPanelHeight = computed(() => {
+      if (
+        panelSchema.value?.queries?.[0]?.fields?.breakdown?.length > 0 &&
+        panelSchema.value.config?.trellis?.layout &&
+        !loading.value
+      ) {
+        return chartPanelStyle.value.height;
+      }
+
+      return "100%";
+    });
+
+    const chartPanelClass = computed(() => {
+      if (
+        panelSchema.value?.queries?.[0]?.fields?.breakdown?.length > 0 &&
+        panelSchema.value.config?.trellis?.layout &&
+        !loading.value
+      ) {
+        return "overflow-auto";
+      }
+
+      return "";
+    });
+
     return {
       store,
       chartPanelRef,
       data,
       loading,
+      searchRequestTraceIds,
       errorDetail,
       panelData,
       noData,
@@ -765,6 +1176,8 @@ export default defineComponent({
       openDrilldown,
       drilldownPopUpRef,
       hideDrilldownPopUp,
+      chartPanelClass,
+      chartPanelHeight,
     };
   },
 });

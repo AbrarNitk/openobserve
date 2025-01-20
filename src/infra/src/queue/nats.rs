@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,10 +15,10 @@
 
 use std::{cmp::max, sync::Arc, time::Duration};
 
-use async_nats::jetstream;
+use async_nats::jetstream::{self, consumer::DeliverPolicy};
 use async_trait::async_trait;
 use bytes::Bytes;
-use config::get_cluster_name;
+use config::{get_cluster_name, get_config};
 use futures::TryStreamExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -34,7 +34,7 @@ pub struct NatsQueue {
 
 impl NatsQueue {
     pub fn new(prefix: &str) -> Self {
-        let prefix = prefix.trim_end_matches(|v| v == '/');
+        let prefix = prefix.trim_end_matches('/');
         Self {
             prefix: prefix.to_string(),
         }
@@ -92,6 +92,7 @@ impl super::Queue for NatsQueue {
             let config = jetstream::consumer::pull::Config {
                 name: Some(consumer_name.to_string()),
                 durable_name: Some(consumer_name.to_string()),
+                deliver_policy: get_deliver_policy(),
                 ..Default::default()
             };
             let consumer = stream
@@ -112,5 +113,14 @@ impl super::Queue for NatsQueue {
 
     async fn purge(&self, _topic: &str, _sequence: usize) -> Result<()> {
         Ok(())
+    }
+}
+
+fn get_deliver_policy() -> DeliverPolicy {
+    match get_config().nats.deliver_policy.to_lowercase().as_str() {
+        "all" | "deliverall" | "deliver_all" => DeliverPolicy::All,
+        "last" | "deliverlast" | "deliver_last" => DeliverPolicy::Last,
+        "new" | "delivernew" | "deliver_new" => DeliverPolicy::New,
+        _ => DeliverPolicy::All,
     }
 }

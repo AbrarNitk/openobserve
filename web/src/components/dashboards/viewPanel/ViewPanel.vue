@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@
           v-model="selectedDate"
           ref="dateTimePickerRef"
           data-test="dashboard-viewpanel-date-time-picker"
+          :disable="disable"
         />
         <AutoRefreshInterval
           v-model="refreshInterval"
@@ -44,14 +45,45 @@
           data-test="dashboard-viewpanel-refresh-interval"
         />
         <q-btn
+          v-if="
+            config.isEnterprise == 'true' &&
+            searchRequestTraceIds.length &&
+            disable
+          "
           class="q-ml-sm"
           outline
+          padding="xs"
+          no-caps
+          icon="cancel"
+          @click="cancelViewPanelQuery"
+          data-test="dashboard-viewpanel-cancel-btn"
+          color="negative"
+        >
+          <q-tooltip>
+            {{ t("panel.cancel") }}
+          </q-tooltip>
+        </q-btn>
+        <q-btn
+          v-else
+          class="q-ml-sm"
+          :outline="isVariablesChanged ? true : false"
           padding="xs"
           no-caps
           icon="refresh"
           @click="refreshData"
           data-test="dashboard-viewpanel-refresh-data-btn"
-        />
+          :disable="disable"
+          :color="isVariablesChanged ? '' : 'warning'"
+          :text-color="store.state.theme == 'dark' ? 'white' : 'black'"
+        >
+          <q-tooltip>
+            {{
+              isVariablesChanged
+                ? "Refresh"
+                : "Refresh to apply latest variable changes"
+            }}
+          </q-tooltip>
+        </q-btn>
         <q-btn
           no-caps
           @click="goBack"
@@ -80,17 +112,34 @@
                 data-test="dashboard-viewpanel-variables-value-selector"
               />
               <div style="flex: 1; overflow: hidden">
+                <div
+                  class="tw-flex tw-justify-end tw-mr-2"
+                  data-test="view-panel-last-refreshed-at"
+                >
+                  <span v-if="lastTriggeredAt" class="lastRefreshedAt">
+                    <span class="lastRefreshedAtIcon">🕑</span
+                    ><RelativeTime
+                      :timestamp="lastTriggeredAt"
+                      fullTimePrefix="Last Refreshed At: "
+                    />
+                  </span>
+                </div>
                 <PanelSchemaRenderer
+                  v-if="chartData"
                   :key="dashboardPanelData.data.type"
                   :panelSchema="chartData"
+                  :dashboard-id="dashboardId"
+                  :folder-id="folderId"
                   :selectedTimeObj="dashboardPanelData.meta.dateTime"
-                  :variablesData="variablesData"
+                  :variablesData="currentVariablesDataRef"
                   :width="6"
                   :searchType="searchType"
                   @error="handleChartApiError"
                   @updated:data-zoom="onDataZoom"
                   @update:initialVariableValues="onUpdateInitialVariableValues"
+                  @last-triggered-at-update="handleLastTriggeredAtUpdate"
                   data-test="dashboard-viewpanel-panel-schema-renderer"
+                  style="height: calc(100% - 21px)"
                 />
               </div>
               <DashboardErrorsComponent
@@ -119,7 +168,11 @@ import {
 } from "vue";
 
 import { useI18n } from "vue-i18n";
-import { getDashboard, getPanel } from "../../../utils/commons";
+import {
+  getDashboard,
+  getPanel,
+  checkIfVariablesAreLoaded,
+} from "../../../utils/commons";
 import { useRoute, useRouter } from "vue-router";
 import { useStore } from "vuex";
 import useDashboardPanelData from "../../../composables/useDashboardPanel";
@@ -127,12 +180,16 @@ import DateTimePickerDashboard from "../../../components/DateTimePickerDashboard
 import DashboardErrorsComponent from "../../../components/dashboards/addPanel/DashboardErrors.vue";
 import VariablesValueSelector from "../../../components/dashboards/VariablesValueSelector.vue";
 import PanelSchemaRenderer from "../../../components/dashboards/PanelSchemaRenderer.vue";
+import RelativeTime from "@/components/common/RelativeTime.vue";
 // import _ from "lodash-es";
 import AutoRefreshInterval from "@/components/AutoRefreshInterval.vue";
 import { onActivated } from "vue";
 import { parseDuration } from "@/utils/date";
-
 import HistogramIntervalDropDown from "@/components/dashboards/addPanel/HistogramIntervalDropDown.vue";
+import { inject, provide, computed } from "vue";
+import useCancelQuery from "@/composables/dashboard/useCancelQuery";
+import config from "@/aws-exports";
+import { isEqual } from "lodash-es";
 
 export default defineComponent({
   name: "ViewPanel",
@@ -143,11 +200,20 @@ export default defineComponent({
     PanelSchemaRenderer,
     AutoRefreshInterval,
     HistogramIntervalDropDown,
+    RelativeTime,
   },
   props: {
     panelId: {
       type: String,
       required: true,
+    },
+    dashboardId: {
+      type: String,
+      required: false,
+    },
+    folderId: {
+      type: String,
+      required: false,
     },
     selectedDateForViewPanel: {
       type: Object,
@@ -164,14 +230,21 @@ export default defineComponent({
   setup(props, { emit }) {
     // This will be used to copy the chart data to the chart renderer component
     // This will deep copy the data object without reactivity and pass it on to the chart renderer
-    const chartData = ref({});
+    const chartData = ref();
     const { t } = useI18n();
     const router = useRouter();
     const route = useRoute();
     const store = useStore();
+
+    const currentVariablesDataRef: any = reactive({});
+
     let parser: any;
+    const dashboardPanelDataPageKey = inject(
+      "dashboardPanelDataPageKey",
+      "dashboard"
+    );
     const { dashboardPanelData, promqlMode, resetDashboardPanelData } =
-      useDashboardPanelData();
+      useDashboardPanelData(dashboardPanelDataPageKey);
     // default selected date will be absolute time
     const selectedDate: any = ref(props.selectedDateForViewPanel);
     const dateTimePickerRef: any = ref(null);
@@ -179,8 +252,28 @@ export default defineComponent({
       errors: [],
     });
     let variablesData: any = reactive({});
+    const initialVariableValues = ref<any>({}); // Store the initial variable values
+    const isVariablesChanged = ref(false); // Flag to track if variables have changed
+    let needsVariablesAutoUpdate = true;
+
     const variablesDataUpdated = (data: any) => {
-      Object.assign(variablesData, data);
+      try {
+        // update the variables data
+        Object.assign(variablesData, data);
+
+        if (needsVariablesAutoUpdate) {
+          // check if the length is > 0
+          if (checkIfVariablesAreLoaded(variablesData)) {
+            needsVariablesAutoUpdate = false;
+          }
+
+          Object.assign(currentVariablesDataRef, variablesData);
+        }
+
+        return;
+      } catch (error) {
+        console.error("Error updating variables data:", error);
+      }
 
       // resize the chart when variables data is updated
       // because if variable requires some more space then need to resize chart
@@ -202,6 +295,12 @@ export default defineComponent({
 
     // array of histogram fields
     let histogramFields: any = ref([]);
+
+    // to store and show when the panel was last loaded
+    const lastTriggeredAt = ref(null);
+    const handleLastTriggeredAtUpdate = (data: any) => {
+      lastTriggeredAt.value = data;
+    };
 
     onBeforeMount(async () => {
       await importSqlParser();
@@ -229,7 +328,7 @@ export default defineComponent({
             // check if the column is histogram
             if (
               column.expr.type === "function" &&
-              column.expr.name === "histogram"
+              column?.expr?.name?.name[0]?.value === "histogram"
             ) {
               const histogramExpr = column.expr;
               if (
@@ -273,7 +372,7 @@ export default defineComponent({
         chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
         // refresh the date time based on current time if relative date is selected
         dateTimePickerRef.value && dateTimePickerRef.value.refresh();
-      }
+      },
     );
 
     const onDataZoom = (event: any) => {
@@ -359,9 +458,33 @@ export default defineComponent({
         refreshInterval.value = parseDuration(params.refresh);
       }
     });
-
+    watch(
+      () => variablesData,
+      (newVal) => {
+        const isValueChanged =
+          currentVariablesDataRef?.values?.length > 0 &&
+          variablesData.values.every((variable: any, index: number) => {
+            const prevValue = currentVariablesDataRef.values[index]?.value;
+            const newValue = variable.value;
+            // Compare current and previous values; handle both string and array cases
+            return Array.isArray(newValue)
+              ? isEqual(prevValue, newValue)
+              : prevValue === newValue;
+          });
+        // Set the `isChanged` flag if values are different
+        isVariablesChanged.value = isValueChanged;
+      },
+      { deep: true },
+    );
     const refreshData = () => {
-      dateTimePickerRef.value.refresh();
+      if (!disable.value) {
+        dateTimePickerRef.value.refresh();
+        Object.assign(
+          currentVariablesDataRef,
+          JSON.parse(JSON.stringify(variablesData)),
+        );
+        isVariablesChanged.value = false;
+      }
     };
 
     const currentDashboard = toRaw(store.state.currentSelectedDashboard);
@@ -437,6 +560,46 @@ export default defineComponent({
       emit("update:initialVariableValues", ...args);
     };
 
+    // [START] cancel running queries
+
+    //reactive object for loading state of variablesData and panels
+    const variablesAndPanelsDataLoadingState = reactive({
+      variablesData: {},
+      panels: {},
+      searchRequestTraceIds: {},
+    });
+
+    // provide variablesAndPanelsDataLoadingState to share data between components
+    provide(
+      "variablesAndPanelsDataLoadingState",
+      variablesAndPanelsDataLoadingState
+    );
+
+    const searchRequestTraceIds = computed(() => {
+      const searchIds = Object.values(
+        variablesAndPanelsDataLoadingState.searchRequestTraceIds
+      ).filter((item: any) => item.length > 0);
+      return searchIds.flat() as string[];
+    });
+
+    const { traceIdRef, cancelQuery } = useCancelQuery();
+
+    const cancelViewPanelQuery = () => {
+      traceIdRef.value = searchRequestTraceIds.value;
+      cancelQuery();
+    };
+
+    const disable = ref(false);
+
+    watch(variablesAndPanelsDataLoadingState, () => {
+      const panelsValues = Object.values(
+        variablesAndPanelsDataLoadingState.panels
+      );
+      disable.value = panelsValues.some((item: any) => item === true);
+    });
+
+    // [END] cancel running queries
+
     return {
       t,
       updateDateTime,
@@ -459,6 +622,15 @@ export default defineComponent({
       onDataZoom,
       getInitialVariablesData,
       onUpdateInitialVariableValues,
+      lastTriggeredAt,
+      handleLastTriggeredAtUpdate,
+      searchRequestTraceIds,
+      cancelViewPanelQuery,
+      disable,
+      config,
+      currentVariablesDataRef,
+      isVariablesChanged,
+      store
     };
   },
 });

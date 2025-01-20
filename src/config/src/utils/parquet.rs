@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,7 +24,10 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use futures::TryStreamExt;
 use parquet::{
-    arrow::{arrow_reader::ArrowReaderMetadata, AsyncArrowWriter, ParquetRecordBatchStreamBuilder},
+    arrow::{
+        arrow_reader::ArrowReaderMetadata, async_reader::ParquetRecordBatchStream,
+        AsyncArrowWriter, ParquetRecordBatchStreamBuilder,
+    },
     basic::{Compression, Encoding},
     file::{metadata::KeyValue, properties::WriterProperties},
 };
@@ -35,19 +38,13 @@ pub fn new_parquet_writer<'a>(
     buf: &'a mut Vec<u8>,
     schema: &'a Arc<Schema>,
     bloom_filter_fields: &'a [String],
-    full_text_search_fields: &'a [String],
     metadata: &'a FileMeta,
 ) -> AsyncArrowWriter<&'a mut Vec<u8>> {
     let cfg = get_config();
-    let row_group_size = if cfg.limit.parquet_max_row_group_size > 0 {
-        cfg.limit.parquet_max_row_group_size
-    } else {
-        PARQUET_MAX_ROW_GROUP_SIZE
-    };
     let mut writer_props = WriterProperties::builder()
         .set_write_batch_size(PARQUET_BATCH_SIZE) // in bytes
         .set_data_page_size_limit(PARQUET_PAGE_SIZE) // maximum size of a data page in bytes
-        .set_max_row_group_size(row_group_size) // maximum number of rows in a row group
+        .set_max_row_group_size(PARQUET_MAX_ROW_GROUP_SIZE) // maximum number of rows in a row group
         .set_compression(Compression::ZSTD(Default::default()))
         .set_column_dictionary_enabled(
             cfg.common.column_timestamp.as_str().into(),
@@ -66,39 +63,18 @@ pub fn new_parquet_writer<'a>(
                 metadata.original_size.to_string(),
             ),
         ]));
-    for field in SQL_FULL_TEXT_SEARCH_FIELDS.iter() {
-        writer_props = writer_props.set_column_dictionary_enabled(field.as_str().into(), false);
-    }
-    for field in full_text_search_fields.iter() {
-        writer_props = writer_props.set_column_dictionary_enabled(field.as_str().into(), false);
-    }
     // Bloom filter stored by row_group, set NDV to reduce the memory usage.
     // In this link, it says that the optimal number of NDV is 1000, here we use rg_size / NDV_RATIO
     // refer: https://www.influxdata.com/blog/using-parquets-bloom-filters/
-    let mut bf_ndv = min(metadata.records as u64, row_group_size as u64);
+    let mut bf_ndv = min(metadata.records as u64, PARQUET_MAX_ROW_GROUP_SIZE as u64);
     if bf_ndv > 1000 {
         bf_ndv = max(1000, bf_ndv / cfg.common.bloom_filter_ndv_ratio);
     }
     if cfg.common.bloom_filter_enabled {
-        // if bloom_filter_on_all_fields is true, then use all string fields
-        let fields = if cfg.common.bloom_filter_on_all_fields {
-            schema
-                .fields()
-                .iter()
-                .filter(|f| {
-                    f.data_type() == &arrow::datatypes::DataType::Utf8
-                        && !SQL_FULL_TEXT_SEARCH_FIELDS.contains(f.name())
-                        && !full_text_search_fields.contains(f.name())
-                })
-                .map(|f| f.name().to_string())
-                .collect::<Vec<_>>()
-        } else {
-            let mut fields = bloom_filter_fields.to_vec();
-            fields.extend(BLOOM_FILTER_DEFAULT_FIELDS.clone());
-            fields.sort();
-            fields.dedup();
-            fields
-        };
+        let mut fields = bloom_filter_fields.to_vec();
+        fields.extend(BLOOM_FILTER_DEFAULT_FIELDS.clone());
+        fields.sort();
+        fields.dedup();
         for field in fields {
             writer_props = writer_props
                 .set_column_bloom_filter_enabled(field.as_str().into(), true)
@@ -114,17 +90,10 @@ pub async fn write_recordbatch_to_parquet(
     schema: Arc<Schema>,
     record_batches: &[RecordBatch],
     bloom_filter_fields: &[String],
-    full_text_search_fields: &[String],
     metadata: &FileMeta,
 ) -> Result<Vec<u8>, anyhow::Error> {
     let mut buf = Vec::new();
-    let mut writer = new_parquet_writer(
-        &mut buf,
-        &schema,
-        bloom_filter_fields,
-        full_text_search_fields,
-        metadata,
-    );
+    let mut writer = new_parquet_writer(&mut buf, &schema, bloom_filter_fields, metadata);
     for batch in record_batches {
         writer.write(batch).await?;
     }
@@ -149,25 +118,39 @@ pub fn parse_file_key_columns(key: &str) -> Result<(String, String, String), any
     Ok((stream_key, date_key, file_name))
 }
 
-pub async fn read_recordbatch_from_bytes(
+pub async fn get_recordbatch_reader_from_bytes(
     data: &bytes::Bytes,
-) -> Result<(Arc<Schema>, Vec<RecordBatch>), anyhow::Error> {
+) -> Result<(Arc<Schema>, ParquetRecordBatchStream<Cursor<bytes::Bytes>>), anyhow::Error> {
     let schema_reader = Cursor::new(data.clone());
     let arrow_reader = ParquetRecordBatchStreamBuilder::new(schema_reader).await?;
     let schema = arrow_reader.schema().clone();
-    let record_reader = arrow_reader.build()?;
-    let batches = record_reader.try_collect().await?;
+    let reader = arrow_reader.with_batch_size(PARQUET_BATCH_SIZE).build()?;
+    Ok((schema, reader))
+}
+
+pub async fn get_recordbatch_reader_from_file(
+    path: &PathBuf,
+) -> Result<(Arc<Schema>, ParquetRecordBatchStream<tokio::fs::File>), anyhow::Error> {
+    let file = tokio::fs::File::open(path).await?;
+    let arrow_reader = ParquetRecordBatchStreamBuilder::new(file).await?;
+    let schema = arrow_reader.schema().clone();
+    let reader = arrow_reader.with_batch_size(PARQUET_BATCH_SIZE).build()?;
+    Ok((schema, reader))
+}
+
+pub async fn read_recordbatch_from_bytes(
+    data: &bytes::Bytes,
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), anyhow::Error> {
+    let (schema, reader) = get_recordbatch_reader_from_bytes(data).await?;
+    let batches = reader.try_collect().await?;
     Ok((schema, batches))
 }
 
 pub async fn read_recordbatch_from_file(
     path: &PathBuf,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), anyhow::Error> {
-    let file = tokio::fs::File::open(path).await?;
-    let arrow_reader = ParquetRecordBatchStreamBuilder::new(file).await?;
-    let schema = arrow_reader.schema().clone();
-    let record_reader = arrow_reader.build()?;
-    let batches = record_reader.try_collect().await?;
+    let (schema, reader) = get_recordbatch_reader_from_file(path).await?;
+    let batches = reader.try_collect().await?;
     Ok((schema, batches))
 }
 

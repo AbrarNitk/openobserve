@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -184,11 +184,14 @@ const getSession = () => {
 
     isLoading.value.push(true);
     searchService
-      .search({
-        org_identifier: store.state.selectedOrganization.identifier,
-        query: req,
-        page_type: "logs",
-      }, "RUM")
+      .search(
+        {
+          org_identifier: store.state.selectedOrganization.identifier,
+          query: req,
+          page_type: "logs",
+        },
+        "RUM",
+      )
       .then((res) => {
         if (res.data.hits.length === 0) {
           return;
@@ -203,6 +206,9 @@ const getSession = () => {
         };
 
         getSessionDetails();
+      })
+      .catch((error) => {
+        console.error("Failed to fetch session:", error);
       })
       .finally(() => {
         isLoading.value.pop();
@@ -234,11 +240,14 @@ const getSessionSegments = () => {
   delete req.aggs;
   isLoading.value.push(true);
   searchService
-    .search({
-      org_identifier: store.state.selectedOrganization.identifier,
-      query: req,
-      page_type: "logs",
-    }, "RUM")
+    .search(
+      {
+        org_identifier: store.state.selectedOrganization.identifier,
+        query: req,
+        page_type: "logs",
+      },
+      "RUM",
+    )
     .then((res) => {
       // const segmentsCopy = [];
       // const viewIds = [];
@@ -260,6 +269,9 @@ const getSessionSegments = () => {
       // });
 
       // segments.value = segmentsCopy.flat();
+    })
+    .catch((error) => {
+      console.error("Failed to fetch session events:", error);
     })
     .finally(() => isLoading.value.pop());
 };
@@ -284,11 +296,14 @@ const getSessionEvents = () => {
   delete req.aggs;
   isLoading.value.push(true);
   searchService
-    .search({
-      org_identifier: store.state.selectedOrganization.identifier,
-      query: req,
-      page_type: "logs",
-    }, "RUM")
+    .search(
+      {
+        org_identifier: store.state.selectedOrganization.identifier,
+        query: req,
+        page_type: "logs",
+      },
+      "RUM",
+    )
     .then((res) => {
       const events = ["action", "view", "error"];
 
@@ -308,6 +323,9 @@ const getSessionEvents = () => {
         return formatEvent(hit);
       });
       getSessionErrorLogs();
+    })
+    .catch((error) => {
+      console.error("Failed to fetch sesion events:", error);
     })
     .finally(() => isLoading.value.pop());
 };
@@ -332,11 +350,14 @@ const getSessionErrorLogs = () => {
   delete req.aggs;
   isLoading.value.push(true);
   searchService
-    .search({
-      org_identifier: store.state.selectedOrganization.identifier,
-      query: req,
-      page_type: "logs",
-    }, "RUM")
+    .search(
+      {
+        org_identifier: store.state.selectedOrganization.identifier,
+        query: req,
+        page_type: "logs",
+      },
+      "RUM",
+    )
     .then((res) => {
       const events = res.data.hits.filter((hit: any) => {
         return hit.date >= Number(sessionState.data.selectedSession.start_time);
@@ -351,6 +372,9 @@ const getSessionErrorLogs = () => {
 
       segmentEvents.value.sort((a, b) => a.timestamp - b.timestamp);
     })
+    .catch((error) => {
+      console.error("Failed to fetch sesion error logs:", error);
+    })
     .finally(() => isLoading.value.pop());
 };
 
@@ -362,7 +386,7 @@ const getDefaultEvent = (event: any) => {
   _event.timestamp = event.date;
   const relativeTime = formatTimeDifference(
     _event.timestamp,
-    Number(sessionState.data.selectedSession.start_time)
+    Number(sessionState.data.selectedSession.start_time),
   );
   _event.relativeTime = relativeTime[0] as number;
   _event.displayTime = relativeTime[1] as string;
@@ -416,10 +440,10 @@ function formatTimeDifference(start_time: number, end_time: number) {
   // Calculate hours, minutes, and seconds
   let hours: string | number = Math.floor(milliSeconds / (1000 * 60 * 60));
   let minutes: string | number = Math.floor(
-    (milliSeconds % (1000 * 60 * 60)) / (1000 * 60)
+    (milliSeconds % (1000 * 60 * 60)) / (1000 * 60),
   );
   let seconds: string | number = Math.floor(
-    (milliSeconds % (1000 * 60)) / 1000
+    (milliSeconds % (1000 * 60)) / 1000,
   );
 
   // Add leading zeros if needed
@@ -444,7 +468,7 @@ const getFormattedDate = (timestamp: number) =>
 const handleSidebarEvent = (event: string, payload: any) => {
   videoPlayerRef.value.goto(
     payload.relativeTime,
-    !!videoPlayerRef.value.playerState?.isPlaying
+    !!videoPlayerRef.value.playerState?.isPlaying,
   );
 };
 </script>

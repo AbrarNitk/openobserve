@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -89,9 +89,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 </div>
                 <SanitizedHtmlRenderer
                   data-test="logs-search-error-message"
-                  :html-content="searchObj.data.errorMsg"
+                  :htmlContent="
+                    searchObj.data.errorMsg +
+                    '<h6 style=\'font-size: 14px; margin: 0;\'>' +
+                    searchObj.data.errorDetail +
+                    '</h6>'
+                  "
                 />
-
                 <div
                   data-test="logs-search-error-20003"
                   v-if="parseInt(searchObj.data.errorCode) == 20003"
@@ -173,7 +177,6 @@ import { useRouter } from "vue-router";
 
 import useTraces from "@/composables/useTraces";
 
-import streamService from "@/services/stream";
 import searchService from "@/services/search";
 import TransformService from "@/services/jstransform";
 import {
@@ -260,7 +263,8 @@ export default defineComponent({
     const router = useRouter();
     const $q = useQuasar();
     const { t } = useI18n();
-    const { searchObj, resetSearchObj } = useTraces();
+    const { searchObj, resetSearchObj, getUrlQueryParams, copyTracesUrl } =
+      useTraces();
     let refreshIntervalID = 0;
     const searchResultRef = ref(null);
     const searchBarRef = ref(null);
@@ -272,7 +276,7 @@ export default defineComponent({
     const indexListRef = ref(null);
     const { getStreams, getStream } = useStreams();
 
-    searchObj.organizationIdetifier =
+    searchObj.organizationIdentifier =
       store.state.selectedOrganization.identifier;
 
     const selectedStreamName = computed(
@@ -368,6 +372,9 @@ export default defineComponent({
                 e.message,
               timeout: 2000,
             });
+          })
+          .finally(()=> {
+            searchObj.loading = false;
           });
       } catch (e) {
         searchObj.loading = false;
@@ -512,7 +519,7 @@ export default defineComponent({
 
     function buildSearch() {
       try {
-        let query = searchObj.data.editorValue;
+        let query = searchObj.data.editorValue.trim();
         var req = getDefaultRequest();
         req.query.from =
           searchObj.data.resultGrid.currentPage *
@@ -578,11 +585,15 @@ export default defineComponent({
         req.query.sql = b64EncodeUnicode(req.query.sql);
 
         const queryParams = getUrlQueryParams();
+
         router.push({ query: queryParams });
         return req;
       } catch (e) {
+        console.log(e);
         searchObj.loading = false;
-        showErrorNotification("Invalid SQL Syntax");
+        showErrorNotification(
+          "An error occurred while constructing the search query."
+        );
       }
     }
 
@@ -598,7 +609,7 @@ export default defineComponent({
 
       searchService
         .get_traces({
-          org_identifier: searchObj.organizationIdetifier,
+          org_identifier: searchObj.organizationIdentifier,
           start_time: queryReq.query.start_time,
           end_time: queryReq.query.end_time,
           filter: filter || "",
@@ -665,7 +676,7 @@ export default defineComponent({
       searchService
         .search(
           {
-            org_identifier: searchObj.organizationIdetifier,
+            org_identifier: searchObj.organizationIdentifier,
             query: req,
             page_type: "traces",
           },
@@ -761,24 +772,11 @@ export default defineComponent({
           });
         }
 
-        const durationFilter = indexListRef.value.duration.input;
-
         let filter = searchObj.data.editorValue.trim();
-
-        let duration = "";
-        if (searchObj.meta.filterType === "basic" && durationFilter.max) {
-          duration += ` duration >= ${
-            durationFilter.min * 1000
-          } AND duration <= ${durationFilter.max * 1000}`;
-
-          filter = filter
-            ? searchObj.data.editorValue + " AND" + duration
-            : duration;
-        }
 
         searchService
           .get_traces({
-            org_identifier: searchObj.organizationIdetifier,
+            org_identifier: searchObj.organizationIdentifier,
             start_time: queryReq.query.start_time,
             end_time: queryReq.query.end_time,
             filter: filter || "",
@@ -805,8 +803,6 @@ export default defineComponent({
 
             //update grid columns
             updateGridColumns();
-
-            if (router.currentRoute.value.query.trace_id) openTraceDetails();
 
             // dismiss();
           })
@@ -837,6 +833,9 @@ export default defineComponent({
         console.log(e?.message);
         searchObj.loading = false;
         showErrorNotification("Search request failed");
+      }
+      finally{
+        searchObj.loading = false;
       }
     }
 
@@ -893,7 +892,29 @@ export default defineComponent({
             "traces",
             true
           );
-
+          searchObj.data.datetime.queryRangeRestrictionInHour = -1;
+          if (
+              stream.settings.max_query_range > 0 &&
+              (searchObj.data.datetime.queryRangeRestrictionInHour >
+                stream.settings.max_query_range ||
+                stream.settings.max_query_range == 0 ||
+                searchObj.data.datetime.queryRangeRestrictionInHour == -1) &&
+              searchObj.data.datetime.queryRangeRestrictionInHour != 0
+            ){
+              searchObj.data.datetime.queryRangeRestrictionInHour =
+                stream.settings.max_query_range;
+              searchObj.data.datetime.queryRangeRestrictionMsg = t(
+                "search.queryRangeRestrictionMsg",
+                {
+                  range:
+                    searchObj.data.datetime.queryRangeRestrictionInHour > 1
+                      ? searchObj.data.datetime.queryRangeRestrictionInHour +
+                        " hours"
+                      : searchObj.data.datetime.queryRangeRestrictionInHour +
+                        " hour",
+                },
+              );
+            }
           schema.push(...stream.schema);
           ftsKeys = new Set([...stream.settings.full_text_search_keys]);
 
@@ -965,7 +986,7 @@ export default defineComponent({
 
         searchObj.data.resultGrid.columns.push({
           name: "@timestamp",
-          field: (row: any) =>
+          accessorfn: (row: any) =>
             timestampToTimezoneDate(
               row["trace_start_time"],
               store.state.timezone,
@@ -1114,7 +1135,7 @@ export default defineComponent({
       searchObj.data.resultGrid.currentPage = 0;
 
       resetSearchObj();
-      searchObj.organizationIdetifier =
+      searchObj.organizationIdentifier =
         store.state.selectedOrganization.identifier;
 
       //get stream list
@@ -1125,7 +1146,7 @@ export default defineComponent({
       // searchObj.loading = true;
       // this.searchObj.data.resultGrid.currentPage = 0;
       // resetSearchObj();
-      // searchObj.organizationIdetifier =
+      // searchObj.organizationIdentifier =
       //   store.state.selectedOrganization.identifier;
       // //get stream list
       // getStreamList();
@@ -1145,8 +1166,13 @@ export default defineComponent({
     });
 
     onActivated(() => {
+      restoreUrlQueryParams();
+      const params = router.currentRoute.value.query;
+      if (params.reload === "true") {
+        loadPageData();
+      }
       if (
-        searchObj.organizationIdetifier !=
+        searchObj.organizationIdentifier !=
         store.state.selectedOrganization.identifier
       ) {
         loadPageData();
@@ -1189,10 +1215,6 @@ export default defineComponent({
         searchObj.data.editorValue = b64DecodeUnicode(queryParams.query);
       }
 
-      if (queryParams.filter_type) {
-        searchObj.meta.filterType = queryParams.filter_type;
-      }
-
       if (
         queryParams.stream &&
         searchObj.data.stream.selectedStream.value !== queryParams.stream
@@ -1202,71 +1224,6 @@ export default defineComponent({
           value: queryParams.stream,
         };
       }
-    }
-
-    const copyTracesUrl = (customTimeRange = null) => {
-      const queryParams = getUrlQueryParams(true);
-
-      if (customTimeRange) {
-        queryParams.from = customTimeRange.from;
-        queryParams.to = customTimeRange.to;
-      }
-
-      const queryString = Object.entries(queryParams)
-        .map(
-          ([key, value]) =>
-            `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
-        )
-        .join("&");
-
-      let shareURL = window.location.origin + window.location.pathname;
-
-      if (queryString != "") {
-        shareURL += "?" + queryString;
-      }
-
-      copyToClipboard(shareURL)
-        .then(() => {
-          $q.notify({
-            type: "positive",
-            message: "Link Copied Successfully!",
-            timeout: 5000,
-          });
-        })
-        .catch(() => {
-          $q.notify({
-            type: "negative",
-            message: "Error while copy link.",
-            timeout: 5000,
-          });
-        });
-    };
-
-    function getUrlQueryParams(getShareLink: false) {
-      const date = searchObj.data.datetime;
-      const query = {};
-
-      query["stream"] = selectedStreamName.value;
-
-      if (date.type == "relative" && !getShareLink) {
-        query["period"] = date.relativeTimePeriod;
-      } else {
-        query["from"] = date.startTime;
-        query["to"] = date.endTime;
-      }
-
-      query["query"] = b64EncodeUnicode(searchObj.data.editorValue);
-
-      query["filter_type"] = searchObj.meta.filterType;
-
-      query["org_identifier"] = store.state.selectedOrganization.identifier;
-
-      query["trace_id"] = router.currentRoute.value.query.trace_id;
-
-      if (router.currentRoute.value.query.span_id)
-        query["span_id"] = router.currentRoute.value.query.span_id;
-
-      return query;
     }
 
     const onSplitterUpdate = () => {
@@ -1327,7 +1284,6 @@ export default defineComponent({
       updateGridColumns,
       getConsumableDateTime,
       runQueryFn,
-      getTraceDetails,
       verifyOrganizationStatus,
       fieldValues,
       onSplitterUpdate,
@@ -1335,6 +1291,7 @@ export default defineComponent({
       indexListRef,
       copyTracesUrl,
       extractFields,
+      getTraceDetails,
     };
   },
   computed: {
@@ -1434,7 +1391,7 @@ export default defineComponent({
 
 <style lang="scss" scoped>
 .traces-search-result-container {
-  height: calc(100vh - 140px) !important;
+  height: calc(100vh - 130px) !important;
 }
 </style>
 <style lang="scss">

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,10 +13,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use config::cluster;
+use config::cluster::LOCAL_NODE;
 use infra::file_list as infra_file_list;
 #[cfg(feature = "enterprise")]
-use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
+use o2_enterprise::enterprise::common::infra::config::get_config as get_o2_config;
 use regex::Regex;
 
 use crate::{
@@ -24,20 +24,22 @@ use crate::{
         infra::config::SYSLOG_ENABLED,
         meta::{organization::DEFAULT_ORG, user::UserRequest},
     },
-    service::{compact::stats::update_stats_from_file_list, db, usage, users},
+    service::{db, self_reporting, users},
 };
 
 mod alert_manager;
 mod compactor;
-pub(crate) mod file_list;
 pub(crate) mod files;
 mod flatten_compactor;
-mod metrics;
+pub mod metrics;
 mod mmdb_downloader;
-mod prom;
+mod promql;
+mod promql_self_consume;
 mod stats;
 pub(crate) mod syslog_server;
 mod telemetry;
+
+pub use mmdb_downloader::MMDB_INIT_NOTIFIER;
 
 pub async fn init() -> Result<(), anyhow::Error> {
     let email_regex = Regex::new(
@@ -87,19 +89,26 @@ pub async fn init() -> Result<(), anyhow::Error> {
 
     // Auth auditing should be done by router also
     #[cfg(feature = "enterprise")]
-    tokio::task::spawn(async move { usage::run_audit_publish().await });
+    tokio::task::spawn(async move { self_reporting::run_audit_publish().await });
 
+    tokio::task::spawn(async move { promql_self_consume::run().await });
     // Router doesn't need to initialize job
-    if cluster::is_router(&cluster::LOCAL_NODE_ROLE) {
+    if LOCAL_NODE.is_router() {
         return Ok(());
     }
 
     // telemetry run
-    if cfg.common.telemetry_enabled && cluster::is_querier(&cluster::LOCAL_NODE_ROLE) {
+    if cfg.common.telemetry_enabled && LOCAL_NODE.is_querier() {
         tokio::task::spawn(async move { telemetry::run().await });
     }
 
-    tokio::task::spawn(async move { usage::run().await });
+    tokio::task::spawn(async move { self_reporting::run().await });
+
+    // cache short_urls
+    tokio::task::spawn(async move { db::short_url::watch().await });
+    db::short_url::cache()
+        .await
+        .expect("short url cache failed");
 
     // initialize metadata watcher
     tokio::task::spawn(async move { db::schema::watch().await });
@@ -109,23 +118,22 @@ pub async fn init() -> Result<(), anyhow::Error> {
     tokio::task::spawn(async move { db::alerts::templates::watch().await });
     tokio::task::spawn(async move { db::alerts::destinations::watch().await });
     tokio::task::spawn(async move { db::alerts::realtime_triggers::watch().await });
-    tokio::task::spawn(async move { db::alerts::watch().await });
+    tokio::task::spawn(async move { db::alerts::alert::watch().await });
     tokio::task::spawn(async move { db::dashboards::reports::watch().await });
     tokio::task::spawn(async move { db::organization::watch().await });
+    tokio::task::spawn(async move { db::pipeline::watch().await });
     #[cfg(feature = "enterprise")]
     tokio::task::spawn(async move { db::ofga::watch().await });
-    if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-        tokio::task::spawn(async move { db::pipelines::watch().await });
-    }
 
     #[cfg(feature = "enterprise")]
-    if !cluster::is_compactor(&cluster::LOCAL_NODE_ROLE)
-        || cluster::is_single_node(&cluster::LOCAL_NODE_ROLE)
-    {
+    if !LOCAL_NODE.is_compactor() || LOCAL_NODE.is_single_node() {
         tokio::task::spawn(async move { db::session::watch().await });
     }
+    if !LOCAL_NODE.is_compactor() && !LOCAL_NODE.is_router() {
+        tokio::task::spawn(async move { db::enrichment_table::watch().await });
+    }
 
-    tokio::task::yield_now().await; // yield let other tasks run
+    tokio::task::yield_now().await;
 
     // cache core metadata
     db::schema::cache().await.expect("stream cache failed");
@@ -149,7 +157,9 @@ pub async fn init() -> Result<(), anyhow::Error> {
     db::alerts::realtime_triggers::cache()
         .await
         .expect("alerts realtime triggers cache failed");
-    db::alerts::cache().await.expect("alerts cache failed");
+    db::alerts::alert::cache()
+        .await
+        .expect("alerts cache failed");
     db::dashboards::reports::cache()
         .await
         .expect("reports cache failed");
@@ -157,75 +167,52 @@ pub async fn init() -> Result<(), anyhow::Error> {
     db::syslog::cache_syslog_settings()
         .await
         .expect("syslog settings cache failed");
-    if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-        db::pipelines::cache().await.expect("syslog cache failed");
-    }
 
-    // cache file list
-    if !cfg.common.meta_store_external {
-        if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-            // load the wal file_list into memory
-            db::file_list::local::load_wal_in_cache()
-                .await
-                .expect("load wal file list failed");
-        }
-        if cluster::is_querier(&cluster::LOCAL_NODE_ROLE)
-            || cluster::is_compactor(&cluster::LOCAL_NODE_ROLE)
-        {
-            db::file_list::remote::cache("", false)
-                .await
-                .expect("file list remote cache failed");
-            infra_file_list::create_table_index()
-                .await
-                .expect("file list create table index failed");
-            update_stats_from_file_list()
-                .await
-                .expect("file list remote calculate stats failed");
-        }
-    }
+    // cache pipeline
+    db::pipeline::cache().await.expect("Pipeline cache failed");
 
     infra_file_list::create_table_index().await?;
-    db::file_list::remote::cache_stats()
-        .await
-        .expect("Load stream stats failed");
+    infra_file_list::LOCAL_CACHE.create_table_index().await?;
+    tokio::task::spawn(async move { db::file_list::cache_stats().await });
 
     #[cfg(feature = "enterprise")]
     db::ofga::cache().await.expect("ofga model cache failed");
 
     #[cfg(feature = "enterprise")]
-    if !cluster::is_compactor(&cluster::LOCAL_NODE_ROLE) {
+    if !LOCAL_NODE.is_compactor() {
         db::session::cache()
             .await
             .expect("user session cache failed");
     }
 
     // check wal directory
-    if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
+    if LOCAL_NODE.is_ingester() {
         // create wal dir
         if let Err(e) = std::fs::create_dir_all(&cfg.common.data_wal_dir) {
-            log::error!("Failed to create wal dir: {}", e);
-        }
-        if let Err(e) = std::fs::create_dir_all(&cfg.common.data_idx_dir) {
             log::error!("Failed to create wal dir: {}", e);
         }
     }
 
     tokio::task::spawn(async move { files::run().await });
-    tokio::task::spawn(async move { file_list::run().await });
     tokio::task::spawn(async move { stats::run().await });
     tokio::task::spawn(async move { compactor::run().await });
     tokio::task::spawn(async move { flatten_compactor::run().await });
     tokio::task::spawn(async move { metrics::run().await });
-    tokio::task::spawn(async move { prom::run().await });
+    tokio::task::spawn(async move { promql::run().await });
     tokio::task::spawn(async move { alert_manager::run().await });
+
+    // load metrics disk cache
+    tokio::task::spawn(async move { crate::service::promql::search::init().await });
 
     #[cfg(feature = "enterprise")]
     o2_enterprise::enterprise::openfga::authorizer::authz::init_open_fga().await;
 
     // RBAC model
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.openfga.enabled {
-        crate::common::infra::ofga::init().await;
+    if get_o2_config().openfga.enabled {
+        if let Err(e) = crate::common::infra::ofga::init().await {
+            log::error!("OFGA init failed: {}", e);
+        }
     }
 
     // Shouldn't serve request until initialization finishes

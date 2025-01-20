@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,26 +15,22 @@
 
 use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
 use config::{
-    cluster::LOCAL_NODE_UUID,
+    cluster::LOCAL_NODE,
     get_config,
     meta::{
-        cluster::Role,
+        cluster::{CompactionJobType, Role},
         stream::{PartitionTimeLevel, StreamType, ALL_STREAM_TYPES},
     },
 };
 use infra::{
-    dist_lock, file_list as infra_file_list,
+    file_list as infra_file_list,
     schema::{get_settings, unwrap_partition_time_level},
 };
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::{
-    common::infra::cluster::{get_node_by_uuid, get_node_from_consistent_hash},
-    service::db,
-};
+use crate::{common::infra::cluster::get_node_from_consistent_hash, service::db};
 
-mod file_list;
-pub mod file_list_deleted;
+pub mod deleted;
 pub mod flatten;
 pub mod merge;
 pub mod retention;
@@ -49,36 +45,43 @@ pub async fn run_retention() -> Result<(), anyhow::Error> {
     }
 
     let now = config::utils::time::now();
-    let date = now - Duration::try_days(cfg.compact.data_retention_days).unwrap();
-    let data_lifecycle_end = date.format("%Y-%m-%d").to_string();
+    let data_lifecycle_end = now - Duration::try_days(cfg.compact.data_retention_days).unwrap();
 
     let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         for stream_type in ALL_STREAM_TYPES {
+            if stream_type == StreamType::EnrichmentTables {
+                continue; // skip data retention for enrichment tables
+            }
             let streams = db::schema::list_streams_from_cache(&org_id, stream_type).await;
             for stream_name in streams {
-                let Some(node) =
-                    get_node_from_consistent_hash(&stream_name, &Role::Compactor).await
+                let Some(node_name) =
+                    get_node_from_consistent_hash(&stream_name, &Role::Compactor, None).await
                 else {
                     continue; // no compactor node
                 };
-                if LOCAL_NODE_UUID.ne(&node) {
+                if LOCAL_NODE.name.ne(&node_name) {
                     continue; // not this node
                 }
 
-                let schema = infra::schema::get(&org_id, &stream_name, stream_type).await?;
-                let stream = super::stream::stream_res(&stream_name, stream_type, schema, None);
-                let stream_data_retention_end = if stream.settings.data_retention > 0 {
-                    let date = now - Duration::try_days(stream.settings.data_retention).unwrap();
-                    date.format("%Y-%m-%d").to_string()
+                let stream_settings =
+                    infra::schema::get_settings(&org_id, &stream_name, stream_type)
+                        .await
+                        .unwrap_or_default();
+                let stream_data_retention_end = if stream_settings.data_retention > 0 {
+                    now - Duration::try_days(stream_settings.data_retention).unwrap()
                 } else {
-                    data_lifecycle_end.clone()
+                    data_lifecycle_end
                 };
+
+                let extended_retention_days = &stream_settings.extended_retention_days;
+                // creates jobs to delete data
                 if let Err(e) = retention::delete_by_stream(
                     &stream_data_retention_end,
                     &org_id,
                     stream_type,
                     &stream_name,
+                    extended_retention_days,
                 )
                 .await
                 {
@@ -103,10 +106,12 @@ pub async fn run_retention() -> Result<(), anyhow::Error> {
         let stream_name = columns[2];
         let retention = columns[3];
 
-        let Some(node) = get_node_from_consistent_hash(stream_name, &Role::Compactor).await else {
+        let Some(node_name) =
+            get_node_from_consistent_hash(stream_name, &Role::Compactor, None).await
+        else {
             continue; // no compactor node
         };
-        if LOCAL_NODE_UUID.ne(&node) {
+        if LOCAL_NODE.name.ne(&node_name) {
             continue; // not this node
         }
 
@@ -138,7 +143,7 @@ pub async fn run_retention() -> Result<(), anyhow::Error> {
 }
 
 /// Generate job for compactor
-pub async fn run_generate_job() -> Result<(), anyhow::Error> {
+pub async fn run_generate_job(job_type: CompactionJobType) -> Result<(), anyhow::Error> {
     let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         // check backlist
@@ -149,12 +154,12 @@ pub async fn run_generate_job() -> Result<(), anyhow::Error> {
         for stream_type in ALL_STREAM_TYPES {
             let streams = db::schema::list_streams_from_cache(&org_id, stream_type).await;
             for stream_name in streams {
-                let Some(node) =
-                    get_node_from_consistent_hash(&stream_name, &Role::Compactor).await
+                let Some(node_name) =
+                    get_node_from_consistent_hash(&stream_name, &Role::Compactor, None).await
                 else {
                     continue; // no compactor node
                 };
-                if LOCAL_NODE_UUID.ne(&node) {
+                if LOCAL_NODE.name.ne(&node_name) {
                     // Check if this node holds the stream
                     if let Some((offset, _)) = db::compact::files::get_offset_from_cache(
                         &org_id,
@@ -192,16 +197,37 @@ pub async fn run_generate_job() -> Result<(), anyhow::Error> {
                     continue;
                 }
 
-                if let Err(e) =
-                    merge::generate_job_by_stream(&org_id, stream_type, &stream_name).await
-                {
-                    log::error!(
-                        "[COMPACTOR] generate_job_by_stream [{}/{}/{}] error: {}",
-                        org_id,
-                        stream_type,
-                        stream_name,
-                        e
-                    );
+                match job_type {
+                    CompactionJobType::Current => {
+                        if let Err(e) =
+                            merge::generate_job_by_stream(&org_id, stream_type, &stream_name).await
+                        {
+                            log::error!(
+                                "[COMPACTOR] generate_job_by_stream [{}/{}/{}] error: {}",
+                                org_id,
+                                stream_type,
+                                stream_name,
+                                e
+                            );
+                        }
+                    }
+                    CompactionJobType::Historical => {
+                        if let Err(e) = merge::generate_old_data_job_by_stream(
+                            &org_id,
+                            stream_type,
+                            &stream_name,
+                        )
+                        .await
+                        {
+                            log::error!(
+                                "[COMPACTOR] generate_old_data_job_by_stream [{}/{}/{}] error: {}",
+                                org_id,
+                                stream_type,
+                                stream_name,
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -216,7 +242,7 @@ pub async fn run_merge(
 ) -> Result<(), anyhow::Error> {
     let cfg = get_config();
     let mut jobs =
-        infra_file_list::get_pending_jobs(&LOCAL_NODE_UUID, cfg.compact.batch_size).await?;
+        infra_file_list::get_pending_jobs(&LOCAL_NODE.uuid, cfg.compact.batch_size).await?;
     if jobs.is_empty() {
         return Ok(());
     }
@@ -235,13 +261,14 @@ pub async fn run_merge(
             .unwrap_or_default();
         let partition_time_level =
             unwrap_partition_time_level(stream_setting.partition_time_level, stream_type);
-        if partition_time_level == PartitionTimeLevel::Daily || cfg.compact.step_secs < 3600 {
+        if partition_time_level == PartitionTimeLevel::Daily {
             // check if this stream need process by this node
-            let Some(node) = get_node_from_consistent_hash(&stream_name, &Role::Compactor).await
+            let Some(node_name) =
+                get_node_from_consistent_hash(&stream_name, &Role::Compactor, None).await
             else {
                 continue; // no compactor node
             };
-            if LOCAL_NODE_UUID.ne(&node) {
+            if LOCAL_NODE.name.ne(&node_name) {
                 need_release_ids.push(job.id); // not this node
             }
         }
@@ -283,7 +310,7 @@ pub async fn run_merge(
 
     let mut tasks = Vec::with_capacity(jobs.len());
     let semaphore = std::sync::Arc::new(Semaphore::new(cfg.limit.file_merge_thread_num));
-    let mut min_offset = std::i64::MAX;
+    let mut min_offset = i64::MAX;
     for job in jobs {
         if job.offsets == 0 {
             log::error!("[COMPACTOR] merge job offset error: {}", job.offsets);
@@ -341,13 +368,6 @@ pub async fn run_merge(
         task.await?;
     }
 
-    // after compact, compact file list from storage
-    if !cfg.common.meta_store_external {
-        if let Err(e) = file_list::run(min_offset).await {
-            log::error!("[COMPACTOR] merge file list error: {}", e);
-        }
-    }
-
     Ok(())
 }
 
@@ -372,43 +392,18 @@ pub async fn run_delay_deletion() -> Result<(), anyhow::Error> {
     let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         // get the working node for the organization
-        let (_, node) = db::compact::organization::get_offset(&org_id, "file_list_deleted").await;
-        if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).await.is_some()
-        {
-            continue;
-        }
-
-        // before start processing, set current node to lock the organization
-        let lock_key = format!("/compact/organization/{org_id}");
-        let locker = dist_lock::lock(&lock_key, 0).await?;
-        // check the working node for the organization again, maybe other node locked it
-        // first
-        let (offset, node) =
-            db::compact::organization::get_offset(&org_id, "file_list_deleted").await;
-        if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).await.is_some()
-        {
-            dist_lock::unlock(&locker).await?;
-            continue;
-        }
-        let ret = if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
-            db::compact::organization::set_offset(
-                &org_id,
-                "file_list_deleted",
-                offset,
-                Some(&LOCAL_NODE_UUID.clone()),
-            )
-            .await
-        } else {
-            Ok(())
+        let Some(node_name) = get_node_from_consistent_hash(&org_id, &Role::Compactor, None).await
+        else {
+            continue; // no compactor node
         };
-        // already bind to this node, we can unlock now
-        dist_lock::unlock(&locker).await?;
-        drop(locker);
-        ret?;
+        if LOCAL_NODE.name.ne(&node_name) {
+            continue; // not this node
+        }
 
+        let (offset, _) = db::compact::organization::get_offset(&org_id, "file_list_deleted").await;
         let batch_size = 10000;
         loop {
-            match file_list_deleted::delete(&org_id, offset, time_max, batch_size).await {
+            match deleted::delete(&org_id, offset, time_max, batch_size).await {
                 Ok(affected) => {
                     if affected == 0 {
                         break;
@@ -428,7 +423,7 @@ pub async fn run_delay_deletion() -> Result<(), anyhow::Error> {
             &org_id,
             "file_list_deleted",
             time_max,
-            Some(&LOCAL_NODE_UUID.clone()),
+            Some(&LOCAL_NODE.uuid.clone()),
         )
         .await?;
     }

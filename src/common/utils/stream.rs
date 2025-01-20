@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,22 +13,19 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{
-    io::{Error, ErrorKind},
-    sync::Arc,
-};
+use std::io::{Error, ErrorKind};
 
 use actix_web::HttpResponse;
+use arrow::array::{Int64Array, RecordBatch};
 use config::{
     get_config,
     meta::stream::{FileMeta, StreamType},
-    utils::{arrow::record_batches_to_json_rows, json},
     FILE_EXT_JSON,
 };
-use datafusion::{
-    arrow::{datatypes::Schema, record_batch::RecordBatch},
-    datasource::MemTable,
-    prelude::SessionContext,
+
+use crate::{
+    common::meta::user::{User, UserRole},
+    service::users,
 };
 
 #[inline(always)]
@@ -72,56 +69,117 @@ pub fn get_file_name_v1(org_id: &str, stream_name: &str, suffix: u32) -> String 
 }
 
 pub async fn populate_file_meta(
-    schema: Arc<Schema>,
-    batch: Vec<Vec<RecordBatch>>,
+    batches: &[&RecordBatch],
     file_meta: &mut FileMeta,
+    min_field: Option<&str>,
+    max_field: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    if schema.fields().is_empty() || batch.is_empty() {
+    if batches.is_empty() {
         return Ok(());
     }
-    let ctx = SessionContext::new();
-    let provider = MemTable::try_new(schema, batch)?;
-    ctx.register_table("temp", Arc::new(provider))?;
+    let cfg = get_config();
+    let min_field = min_field.unwrap_or_else(|| cfg.common.column_timestamp.as_str());
+    let max_field = max_field.unwrap_or_else(|| cfg.common.column_timestamp.as_str());
 
-    let sql = format!(
-        "SELECT min({0}) as min, max({0}) as max, count({0}) as num_records FROM temp;",
-        get_config().common.column_timestamp
-    );
-    let df = ctx.sql(sql.as_str()).await?;
-    let batches = df.collect().await?;
-    let batches_ref: Vec<&RecordBatch> = batches.iter().collect();
-    let json_rows = record_batches_to_json_rows(&batches_ref)?;
-    let mut result: Vec<json::Value> = json_rows.into_iter().map(json::Value::Object).collect();
-    if result.is_empty() {
-        return Ok(());
+    let total = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+    let mut min_val = i64::MAX;
+    let mut max_val = 0;
+    for batch in batches.iter() {
+        let num_row = batch.num_rows();
+        let Some(min_field) = batch.column_by_name(min_field) else {
+            return Err(anyhow::anyhow!("No min_field found: {}", min_field));
+        };
+        let Some(max_field) = batch.column_by_name(max_field) else {
+            return Err(anyhow::anyhow!("No max_field found: {}", max_field));
+        };
+        let min_col = min_field.as_any().downcast_ref::<Int64Array>().unwrap();
+        let max_col = max_field.as_any().downcast_ref::<Int64Array>().unwrap();
+        for i in 0..num_row {
+            let val = min_col.value(i);
+            if val < min_val {
+                min_val = val;
+            }
+            let val = max_col.value(i);
+            if val > max_val {
+                max_val = val;
+            }
+        }
     }
-    let record = result.pop().expect("No record found");
-    if record.is_null() {
-        return Ok(());
+    if min_val == i64::MAX {
+        min_val = 0;
     }
-    file_meta.min_ts = record
-        .get("min")
-        .expect("No field found: min")
-        .as_i64()
-        .expect("No value found: min");
-    file_meta.max_ts = record
-        .get("max")
-        .expect("No field found: max")
-        .as_i64()
-        .expect("No value found: max");
-    file_meta.records = record
-        .get("num_records")
-        .expect("No field found: num_records")
-        .as_i64()
-        .expect("No value found: num_records");
+
+    file_meta.min_ts = min_val;
+    file_meta.max_ts = max_val;
+    file_meta.records = total as i64;
     Ok(())
+}
+
+pub async fn get_settings_max_query_range(
+    stream_max_query_range: i64,
+    org_id: &str,
+    user_id: Option<&str>,
+) -> i64 {
+    if user_id.is_none() {
+        return stream_max_query_range;
+    }
+
+    if let Some(user) = users::get_user(Some(org_id), user_id.unwrap()).await {
+        return get_max_query_range_if_sa(stream_max_query_range, &user);
+    }
+
+    stream_max_query_range
+}
+
+pub fn get_max_query_range_if_sa(stream_max_query_range: i64, user: &User) -> i64 {
+    log::debug!("get_max_query_range_if_sa stream_max_query_range: {stream_max_query_range}, user_role: {:?}", user.role);
+    if user.role == UserRole::ServiceAccount {
+        let max_query_range_sa = get_config().limit.max_query_range_for_sa;
+        return if max_query_range_sa > 0 {
+            std::cmp::min(stream_max_query_range, max_query_range_sa)
+        } else {
+            stream_max_query_range
+        };
+    }
+    stream_max_query_range
+}
+
+/// Get the maximum query range for a list of streams in hours
+pub async fn get_max_query_range(
+    stream_names: &[String],
+    org_id: &str,
+    user_id: &str,
+    stream_type: StreamType,
+) -> i64 {
+    let user = users::get_user(Some(org_id), user_id).await;
+
+    futures::future::join_all(
+        stream_names
+            .iter()
+            .map(|stream_name| infra::schema::get_settings(org_id, stream_name, stream_type)),
+    )
+    .await
+    .into_iter()
+    .filter_map(|settings| {
+        settings.map(|s| {
+            if let Some(user) = &user {
+                get_max_query_range_if_sa(s.max_query_range, user)
+            } else {
+                s.max_query_range
+            }
+        })
+    })
+    .max()
+    .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datafusion::arrow::{
-        array::{Int64Array, StringArray},
-        datatypes::{DataType, Field},
+        array::StringArray,
+        datatypes::{DataType, Field, Schema},
     };
 
     use super::*;
@@ -142,11 +200,9 @@ mod tests {
     #[test]
     fn test_get_file_name_v1() {
         let file_key = get_file_name_v1("nexus", "Olympics", 2);
-        assert!(
-            file_key
-                .as_str()
-                .ends_with("/wal/nexus/logs/Olympics/Olympics_2.json")
-        );
+        assert!(file_key
+            .as_str()
+            .ends_with("/wal/nexus/logs/Olympics/Olympics_2.json"));
     }
 
     #[test]
@@ -168,7 +224,7 @@ mod tests {
 
         // define data.
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            schema,
             vec![
                 Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
                 Arc::new(Int64Array::from(vec![1, 2, 1, 2])),
@@ -184,8 +240,46 @@ mod tests {
             original_size: 1000,
             compressed_size: 700,
             flattened: false,
+            index_size: 0,
         };
-        populate_file_meta(schema, vec![vec![batch]], &mut file_meta)
+        populate_file_meta(&[&batch], &mut file_meta, None, None)
+            .await
+            .unwrap();
+        assert_eq!(file_meta.records, 4);
+        assert_eq!(file_meta.min_ts, val - 100);
+    }
+
+    #[tokio::test]
+    async fn test_populate_file_meta_with_custom_field() {
+        // define a schema.
+        let val: i64 = 1666093521151350;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("log", DataType::Utf8, false),
+            Field::new("pod_id", DataType::Int64, false),
+            Field::new("time", DataType::Int64, false),
+        ]));
+
+        // define data.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+                Arc::new(Int64Array::from(vec![1, 2, 1, 2])),
+                Arc::new(Int64Array::from(vec![val - 100, val - 10, val - 90, val])),
+            ],
+        )
+        .unwrap();
+        // let file_name = path.file_name();
+        let mut file_meta = FileMeta {
+            min_ts: 0,
+            max_ts: 0,
+            records: 0,
+            original_size: 1000,
+            compressed_size: 700,
+            flattened: false,
+            index_size: 0,
+        };
+        populate_file_meta(&[&batch], &mut file_meta, Some("time"), Some("time"))
             .await
             .unwrap();
         assert_eq!(file_meta.records, 4);

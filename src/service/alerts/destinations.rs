@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,17 +14,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use actix_web::http;
+use config::meta::alerts::destinations::{Destination, DestinationType, DestinationWithTemplate};
 
 use crate::{
     common::{
         infra::config::STREAM_ALERTS,
-        meta::{
-            alerts::destinations::{Destination, DestinationType, DestinationWithTemplate},
-            authz::Authz,
-        },
-        utils::auth::{remove_ownership, set_ownership},
+        meta::authz::Authz,
+        utils::auth::{is_ofga_unsupported, remove_ownership, set_ownership},
     },
-    service::db,
+    service::db::{self, user},
 };
 
 pub async fn save(
@@ -50,10 +48,41 @@ pub async fn save(
                     anyhow::anyhow!("Atleast one alert destination email is required"),
                 ));
             }
+            let mut lowercase_emails = vec![];
+            for email in destination.emails.iter() {
+                let email = email.trim().to_lowercase();
+                // Check if the email is part of the org
+                match user::get(Some(org_id), &email).await {
+                    Ok(user) => {
+                        if user.is_none() {
+                            return Err((
+                                http::StatusCode::BAD_REQUEST,
+                                anyhow::anyhow!("Destination email must be part of this org"),
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        return Err((
+                            http::StatusCode::BAD_REQUEST,
+                            anyhow::anyhow!("Destination email must be part of this org"),
+                        ));
+                    }
+                }
+                lowercase_emails.push(email);
+            }
             if !config::get_config().smtp.smtp_enabled {
                 return Err((
                     http::StatusCode::INTERNAL_SERVER_ERROR,
                     anyhow::anyhow!("SMTP not configured"),
+                ));
+            }
+            destination.emails = lowercase_emails;
+        }
+        DestinationType::Sns => {
+            if destination.sns_topic_arn.is_none() || destination.aws_region.is_none() {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    anyhow::anyhow!("Topic ARN and Region are required for SNS destinations"),
                 ));
             }
         }
@@ -63,6 +92,15 @@ pub async fn save(
         destination.name = name.to_string();
     }
     destination.name = destination.name.trim().to_string();
+    // Don't allow the characters not supported by ofga
+    if is_ofga_unsupported(&destination.name) {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            anyhow::anyhow!(
+                "Alert destination name cannot contain ':', '#', '?', '&', '%', quotes and space characters"
+            ),
+        ));
+    }
     if destination.name.is_empty() {
         return Err((
             http::StatusCode::BAD_REQUEST,
@@ -164,7 +202,7 @@ pub async fn delete(org_id: &str, name: &str) -> Result<(), (http::StatusCode, a
         for alert in alerts.iter() {
             if stream_key.starts_with(org_id) && alert.destinations.contains(&name.to_string()) {
                 return Err((
-                    http::StatusCode::FORBIDDEN,
+                    http::StatusCode::CONFLICT,
                     anyhow::anyhow!("Alert destination is in use for alert {}", alert.name),
                 ));
             }

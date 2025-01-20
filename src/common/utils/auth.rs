@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -18,6 +18,10 @@ use argon2::{password_hash::SaltString, Algorithm, Argon2, Params, PasswordHashe
 use base64::Engine;
 use config::utils::json;
 use futures::future::{ready, Ready};
+#[cfg(feature = "enterprise")]
+use o2_enterprise::enterprise::common::infra::config::get_config as get_o2_config;
+use once_cell::sync::Lazy;
+use regex::Regex;
 
 #[cfg(feature = "enterprise")]
 use crate::common::infra::config::USER_SESSIONS;
@@ -31,6 +35,32 @@ use crate::common::{
         user::{AuthTokens, UserRole},
     },
 };
+
+pub static RE_OFGA_UNSUPPORTED_NAME: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"[:#?\s'"%&]+"#).unwrap());
+static RE_SPACE_AROUND: Lazy<Regex> = Lazy::new(|| {
+    let char_pattern = r#"[^a-zA-Z0-9:#?'"&%\s]"#;
+    let pattern = format!(r"(\s+{char_pattern}\s+)|(\s+{char_pattern})|({char_pattern}\s+)");
+    Regex::new(&pattern).unwrap()
+});
+
+pub fn into_ofga_supported_format(name: &str) -> String {
+    // remove spaces around special characters
+    let result = RE_SPACE_AROUND.replace_all(name, |caps: &regex::Captures| {
+        caps.iter()
+            .find_map(|m| m)
+            .map(|m| m.as_str().trim())
+            .unwrap_or("")
+            .to_string()
+    });
+    RE_OFGA_UNSUPPORTED_NAME
+        .replace_all(&result, "_")
+        .to_string()
+}
+
+pub fn is_ofga_unsupported(name: &str) -> bool {
+    RE_OFGA_UNSUPPORTED_NAME.is_match(name)
+}
 
 pub(crate) fn get_hash(pass: &str, salt: &str) -> String {
     let key = format!("{pass}{salt}");
@@ -63,10 +93,21 @@ pub(crate) fn is_root_user(user_id: &str) -> bool {
 }
 
 #[cfg(feature = "enterprise")]
-pub async fn set_ownership(org_id: &str, obj_type: &str, obj: Authz) {
-    use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
+pub fn get_role(role: UserRole) -> UserRole {
+    use std::str::FromStr;
 
-    if O2_CONFIG.openfga.enabled {
+    let role = o2_enterprise::enterprise::openfga::authorizer::roles::get_role(format!("{role}"));
+    UserRole::from_str(&role).unwrap()
+}
+
+#[cfg(not(feature = "enterprise"))]
+pub fn get_role(_role: UserRole) -> UserRole {
+    UserRole::Admin
+}
+
+#[cfg(feature = "enterprise")]
+pub async fn set_ownership(org_id: &str, obj_type: &str, obj: Authz) {
+    if get_o2_config().openfga.enabled {
         use o2_enterprise::enterprise::openfga::{authorizer, meta::mapping::OFGA_MODELS};
 
         let obj_str = format!("{}:{}", OFGA_MODELS.get(obj_type).unwrap().key, obj.obj_id);
@@ -102,9 +143,7 @@ pub async fn set_ownership(_org_id: &str, _obj_type: &str, _obj: Authz) {}
 
 #[cfg(feature = "enterprise")]
 pub async fn remove_ownership(org_id: &str, obj_type: &str, obj: Authz) {
-    use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
-
-    if O2_CONFIG.openfga.enabled {
+    if get_o2_config().openfga.enabled {
         use o2_enterprise::enterprise::openfga::{authorizer, meta::mapping::OFGA_MODELS};
         let obj_str = format!("{}:{}", OFGA_MODELS.get(obj_type).unwrap().key, obj.obj_id);
 
@@ -246,7 +285,7 @@ impl FromRequest for AuthExtractor {
                 if method.eq("GET") {
                     method = "LIST".to_string();
                 }
-                if method.eq("PUT") || method.eq("DELETE") {
+                if method.eq("PUT") || method.eq("DELETE") || path_columns[1].eq("search_jobs") {
                     format!(
                         "{}:{}",
                         OFGA_MODELS
@@ -275,6 +314,8 @@ impl FromRequest for AuthExtractor {
                 || method.eq("DELETE")
                 || path_columns[1].starts_with("reports")
                 || path_columns[1].starts_with("savedviews")
+                || path_columns[1].starts_with("functions")
+                || path_columns[1].starts_with("service_accounts")
             {
                 format!(
                     "{}:{}",
@@ -282,6 +323,14 @@ impl FromRequest for AuthExtractor {
                         .get(path_columns[1])
                         .map_or(path_columns[1], |model| model.key),
                     path_columns[2]
+                )
+            } else if method.eq("GET") && path_columns[1].starts_with("dashboards") {
+                format!(
+                    "{}:{}",
+                    OFGA_MODELS
+                        .get(path_columns[1])
+                        .map_or(path_columns[1], |model| model.key),
+                    path_columns[2] // dashboard id
                 )
             } else {
                 format!(
@@ -301,7 +350,11 @@ impl FromRequest for AuthExtractor {
                         .map_or(path_columns[1], |model| model.key),
                     path_columns[2]
                 )
-            } else if method.eq("PUT") && path_columns[1] != "streams" || method.eq("DELETE") {
+            } else if method.eq("PUT")
+                && path_columns[1] != "streams"
+                && path_columns[1] != "pipelines"
+                || method.eq("DELETE")
+            {
                 format!(
                     "{}:{}",
                     OFGA_MODELS
@@ -309,10 +362,19 @@ impl FromRequest for AuthExtractor {
                         .map_or(path_columns[2], |model| model.key),
                     path_columns[3]
                 )
+            } else if method.eq("GET")
+                && path_columns[1].eq("folders")
+                && path_columns[2].eq("name")
+            {
+                // To search with folder name, you need GET permission on all folders
+                format!(
+                    "{}:_all_{}",
+                    OFGA_MODELS
+                        .get(path_columns[1])
+                        .map_or(path_columns[1], |model| model.key),
+                    path_columns[0]
+                )
             } else {
-                if method.eq("POST") && path_columns[3].eq("pipelines") {
-                    method = "PUT".to_string();
-                }
                 format!(
                     "{}:{}",
                     OFGA_MODELS
@@ -356,15 +418,16 @@ impl FromRequest for AuthExtractor {
 
         // if let Some(auth_header) = req.headers().get("Authorization") {
         if !auth_str.is_empty() {
-            if (method.eq("POST") && path_columns[1].starts_with("_search"))
+            if (method.eq("POST") && url_len > 1 && path_columns[1].starts_with("_search"))
                 || path.contains("/prometheus/api/v1/query")
                 || path.contains("/resources")
                 || path.contains("/format_query")
                 || path.contains("/prometheus/api/v1/series")
                 || path.contains("/traces/latest")
-                || (method.eq("LIST") && path.contains("pipelines"))
                 || path.contains("clusters")
                 || path.contains("query_manager")
+                || path.contains("/short")
+                || path.contains("/ws")
             {
                 return ready(Ok(AuthExtractor {
                     auth: auth_str.to_owned(),
@@ -392,9 +455,6 @@ impl FromRequest for AuthExtractor {
                                 )
                                 .as_str(),
                             )
-                        } else if stream_type.eq(&StreamType::Index) {
-                            object_type
-                                .replace("stream:", format!("{}:", StreamType::Logs).as_str())
                         } else {
                             object_type.replace("stream:", format!("{}:", stream_type).as_str())
                         }
@@ -410,7 +470,7 @@ impl FromRequest for AuthExtractor {
                     parent_id: folder,
                 }));
             }
-            if object_type.contains("dashboard") {
+            if object_type.contains("dashboard") && url_len > 1 {
                 let object_type = if method.eq("POST") || method.eq("LIST") {
                     format!(
                         "{}:{}",

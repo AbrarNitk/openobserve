@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,10 +16,10 @@
 use std::sync::Arc;
 
 use config::{
-    cluster::{is_compactor, is_ingester, is_querier, LOCAL_NODE_UUID},
+    cluster::LOCAL_NODE,
     get_config,
     meta::{
-        cluster::{Node, NodeStatus},
+        cluster::{get_internal_grpc_token, Node, NodeStatus},
         stream::FileKey,
     },
 };
@@ -27,9 +27,9 @@ use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use proto::cluster_rpc;
 use tokio::sync::{mpsc, RwLock};
-use tonic::{codec::CompressionEncoding, metadata::MetadataValue, transport::Channel, Request};
+use tonic::{codec::CompressionEncoding, metadata::MetadataValue, Request};
 
-use crate::common::infra::cluster;
+use crate::{common::infra::cluster, service::grpc::get_cached_channel};
 
 static EVENTS: Lazy<RwLock<HashMap<String, EventChannel>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -51,22 +51,21 @@ pub async fn send(items: &[FileKey], node_uuid: Option<String>) -> Result<(), an
         cluster::get_cached_nodes(|node| {
             node.scheduled
                 && (node.status == NodeStatus::Prepare || node.status == NodeStatus::Online)
-                && (is_querier(&node.role) || is_compactor(&node.role) || is_ingester(&node.role))
+                && (node.is_querier() || node.is_compactor() || node.is_ingester())
         })
         .await
         .unwrap_or_default()
     };
-    let local_node_uuid = LOCAL_NODE_UUID.clone();
     let mut events = EVENTS.write().await;
     for node in nodes {
-        if node.uuid.eq(&local_node_uuid) {
+        if node.uuid.eq(&LOCAL_NODE.uuid) {
             continue;
         }
         // if meta_store_external is true, only send to querier
-        if cfg.common.meta_store_external && !is_querier(&node.role) {
+        if cfg.common.meta_store_external && !node.is_querier() {
             continue;
         }
-        if !is_querier(&node.role) && !is_compactor(&node.role) && !is_ingester(&node.role) {
+        if !node.is_querier() && !node.is_compactor() && !node.is_ingester() {
             continue;
         }
         let node_uuid = node.uuid.clone();
@@ -151,15 +150,10 @@ async fn send_to_node(
         }
         let cfg = get_config();
         // connect to the node
-        let token: MetadataValue<_> = cluster::get_internal_grpc_token()
+        let token: MetadataValue<_> = get_internal_grpc_token()
             .parse()
-            .expect("parse internal grpc token faile");
-        let channel = match Channel::from_shared(node.grpc_addr.clone())
-            .unwrap()
-            .connect_timeout(std::time::Duration::from_secs(cfg.grpc.connect_timeout))
-            .connect()
-            .await
-        {
+            .expect("parse internal grpc token failed");
+        let channel = match get_cached_channel(&node.grpc_addr).await {
             Ok(v) => v,
             Err(e) => {
                 log::error!(
@@ -208,7 +202,8 @@ async fn send_to_node(
                     );
                     break;
                 }
-                let request = tonic::Request::new(req_query.clone());
+                let mut request = tonic::Request::new(req_query.clone());
+                request.set_timeout(std::time::Duration::from_secs(cfg.limit.query_timeout));
                 match client.send_file_list(request).await {
                     Ok(_) => break,
                     Err(e) => {

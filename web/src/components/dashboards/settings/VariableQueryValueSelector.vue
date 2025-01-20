@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -39,6 +39,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       :multiple="variableItem.multiSelect"
       popup-no-route-dismiss
       popup-content-style="z-index: 10001"
+      @blur="applyChanges"
     >
       <template v-slot:no-option>
         <q-item>
@@ -94,6 +95,9 @@ export default defineComponent({
   props: ["modelValue", "variableItem"],
   emits: ["update:modelValue"],
   setup(props: any, { emit }) {
+
+    const variableName = props.variableItem?.label || props.variableItem?.name
+
     //get v-model value for selected value  using props
     const selectedValue = ref(props.variableItem?.value);
 
@@ -130,23 +134,40 @@ export default defineComponent({
       }
     };
 
+    const applyChanges = () => {
+      if(props.variableItem.multiSelect) {
+        emitSelectedValues();
+      }
+    }
+
     // update selected value
     watch(selectedValue, () => {
-      emit("update:modelValue", selectedValue.value);
+      if(!props.variableItem.multiSelect) {
+        emitSelectedValues()
+      }
     });
+
+    const emitSelectedValues = () => {
+      emit("update:modelValue", selectedValue.value);
+    }
 
     // Display the selected value
     const displayValue = computed(() => {
-      if (selectedValue.value) {
+      if (selectedValue.value || selectedValue.value == "") {
         if (Array.isArray(selectedValue.value)) {
           if (selectedValue.value.length > 2) {
-            const firstTwoValues = selectedValue.value.slice(0, 2).join(", ");
+            const firstTwoValues = selectedValue.value
+              .slice(0, 2)
+              .map((it: any) => (it === "" ? "<blank>" : it))
+              .join(", ");
             const remainingCount = selectedValue.value.length - 2;
             return `${firstTwoValues} ...+${remainingCount} more`;
           } else if (props.variableItem.options.length == 0) {
             return "(No Data Found)";
           } else {
-            return selectedValue.value.join(", ");
+            return selectedValue.value
+              .map((it: any) => (it === "" ? "<blank>" : it))
+              .join(", ");
           }
         } else if (selectedValue.value == "") {
           return "<blank>";
@@ -167,6 +188,7 @@ export default defineComponent({
       isAllSelected,
       toggleSelectAll,
       displayValue,
+      applyChanges
     };
   },
 });

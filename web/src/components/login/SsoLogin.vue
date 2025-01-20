@@ -22,7 +22,8 @@
         style="width: 400px"
       >
         <div
-          class="flex items-center justify-center full-width text-center realtive"
+          data-test="sso-login-btn"
+          class="flex items-center justify-center full-width text-center relative"
         >
           <img
             class="absolute"

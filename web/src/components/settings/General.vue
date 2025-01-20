@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -39,6 +39,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           dense
           :rules="[(val: any) => !!val || 'Scrape interval is required']"
           :lazy-rules="true"
+        />
+
+        <q-toggle
+          v-if="store.state.zoConfig.websocket_enabled"
+          v-model="enableWebsocketSearch"
+          :label="t('settings.enableWebsocketSearch')"
+          data-test="general-settings-enable-websocket"
+          class="q-py-md showLabelOnTop"
         />
         <span>&nbsp;</span>
 
@@ -106,10 +114,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             </div>
           </div>
           <div v-else style="margin-top: 17px">
-            <div class="q-pt-md text-bold">{{
-              t("settings.customLogoText")
-            }}</div
-            ><br />
+            <div class="q-pt-md text-bold">
+              {{ t("settings.customLogoText") }}
+            </div>
+            <br />
             {{ store.state.zoConfig.custom_logo_text || "No Text Available" }}
             <q-btn
               data-test="settings_ent_logo_custom_text_edit_btn"
@@ -124,9 +132,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         </div>
         <q-separator class="q-mt-sm"></q-separator>
         <div class="q-gutter-sm row q-mt-xs">
-          <div class="q-pt-sm text-bold full-width"
-            >{{ t("settings.customLogoTitle") }} </div
-          ><br />
+          <div class="q-pt-sm text-bold full-width">
+            {{ t("settings.customLogoTitle") }}
+          </div>
+          <br />
           <div
             v-if="
               store.state.zoConfig.hasOwnProperty('custom_logo_img') &&
@@ -161,7 +170,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :counter-label="counterLabelFn"
             style="width: 550px"
             max-file-size="20481"
-            accept=".png, .jpg, .jpeg, .svg, .jpeg2, image/*"
+            accept=".png, .jpg, .jpeg, .gif, .bmp, .jpeg2, image/*"
             @rejected="onRejected"
             @update:model-value="uploadImage"
             class="q-mx-none"
@@ -206,7 +215,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <script lang="ts">
 // @ts-ignore
-import { defineComponent, onActivated, ref } from "vue";
+import { defineComponent, onActivated, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
@@ -216,6 +225,7 @@ import organizations from "@/services/organizations";
 import settingsService from "@/services/settings";
 import config from "@/aws-exports";
 import configService from "@/services/config";
+import DOMPurify from "dompurify";
 
 export default defineComponent({
   name: "PageGeneralSettings",
@@ -237,8 +247,15 @@ export default defineComponent({
     const store = useStore();
     const router: any = useRouter();
     const scrapeIntereval = ref(
-      store.state?.organizationData?.organizationSettings?.scrape_interval ?? 15
+      store.state?.organizationData?.organizationSettings?.scrape_interval ??
+        15,
     );
+
+    const enableWebsocketSearch = ref(
+      store.state?.organizationData?.organizationSettings
+        ?.enable_websocket_search ?? false,
+    );
+
     const loadingState = ref(false);
     const customText = ref("");
     const editingText = ref(false);
@@ -250,7 +267,20 @@ export default defineComponent({
       scrapeIntereval.value =
         store.state?.organizationData?.organizationSettings?.scrape_interval ??
         15;
+
+      enableWebsocketSearch.value =
+        store.state?.organizationData?.organizationSettings
+          ?.enable_websocket_search ?? false;
     });
+
+    watch(
+      () => editingText.value,
+      (value) => {
+        if (!value) {
+          customText.value = store.state.zoConfig.custom_logo_text;
+        }
+      },
+    );
 
     const onSubmit = useLoading(async () => {
       try {
@@ -259,12 +289,13 @@ export default defineComponent({
         store.dispatch("setOrganizationSettings", {
           ...store.state?.organizationData?.organizationSettings,
           scrape_interval: scrapeIntereval.value,
+          enable_websocket_search: enableWebsocketSearch.value,
         });
 
         //update settings in backend
         await organizations.post_organization_settings(
           store.state?.selectedOrganization?.identifier,
-          store.state?.organizationData?.organizationSettings
+          store.state?.organizationData?.organizationSettings,
         );
 
         q.notify({
@@ -293,7 +324,10 @@ export default defineComponent({
           }
         }
         settingsService
-          .createLogo(store.state.selectedOrganization?.identifier || orgIdentifier, formData)
+          .createLogo(
+            store.state.selectedOrganization?.identifier || orgIdentifier,
+            formData,
+          )
           .then(async (res) => {
             if (res.status == 200) {
               q.notify({
@@ -343,7 +377,9 @@ export default defineComponent({
         }
       }
       settingsService
-        .deleteLogo(store.state.selectedOrganization?.identifier || orgIdentifier)
+        .deleteLogo(
+          store.state.selectedOrganization?.identifier || orgIdentifier,
+        )
         .then(async (res: any) => {
           if (res.status == 200) {
             q.notify({
@@ -375,6 +411,13 @@ export default defineComponent({
         });
     };
 
+    const sanitizeInput = (text: string): string => {
+      // Limit input to 100 characters
+
+      // Used DOMPurify for thorough sanitization
+      return DOMPurify.sanitize(text);
+    };
+
     const updateCustomText = () => {
       loadingState.value = true;
       let orgIdentifier = "default";
@@ -384,8 +427,23 @@ export default defineComponent({
         }
       }
 
+      customText.value = sanitizeInput(customText.value);
+      if (customText.value.length > 100) {
+        q.notify({
+          type: "negative",
+          message: "Text should be less than 100 characters.",
+          timeout: 2000,
+        });
+        loadingState.value = false;
+        return;
+      }
+
       settingsService
-        .updateCustomText(store.state.selectedOrganization?.identifier || orgIdentifier, "custom_logo_text", customText.value)
+        .updateCustomText(
+          store.state.selectedOrganization?.identifier || orgIdentifier,
+          "custom_logo_text",
+          customText.value,
+        )
         .then(async (res: any) => {
           if (res.status == 200) {
             q.notify({
@@ -430,10 +488,11 @@ export default defineComponent({
       config,
       router,
       scrapeIntereval,
+      enableWebsocketSearch,
       onSubmit,
       files,
       counterLabelFn(CounterLabelParams: { filesNumber: any; totalSize: any }) {
-        return `(Only .png, .jpg, .jpeg, .svg formats & size <=20kb & Max Size: 150x30px) ${CounterLabelParams.filesNumber} file | ${CounterLabelParams.totalSize}`;
+        return `(Only .png, .jpg, .jpeg, .gif, .bmp, formats & size <=20kb & Max Size: 150x30px) ${CounterLabelParams.filesNumber} file | ${CounterLabelParams.totalSize}`;
       },
       filesImages: ref(null),
       filesMaxSize: ref(null),
@@ -454,6 +513,7 @@ export default defineComponent({
       editingText,
       updateCustomText,
       confirmDeleteImage: ref(false),
+      sanitizeInput,
     };
   },
 });

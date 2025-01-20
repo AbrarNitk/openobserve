@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -92,7 +92,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <template v-if="isLoading.length">
               <div
                 class="q-pb-lg flex items-center justify-center text-center"
-                style="height: calc(100vh - 200px)"
+                style="height: calc(100vh - 190px)"
               >
                 <div>
                   <q-spinner-hourglass
@@ -426,7 +426,7 @@ const getSessions = () => {
     store.state.zoConfig.timestamp_column
   }) as zo_sql_timestamp, min(start) as start_time, max(end) as end_time, min(user_agent_user_agent_family) as browser, min(user_agent_os_family) as os, min(ip) as ip, min(source) as source, session_id from "_sessionreplay" ${
     sessionState.data.editorValue.length
-      ? " where " + sessionState.data.editorValue
+      ? " where " + sessionState.data.editorValue.trim()
       : ""
   } group by session_id order by zo_sql_timestamp DESC`;
   req.query.sql_mode = "full";
@@ -436,11 +436,14 @@ const getSessions = () => {
   updateUrlQueryParams();
 
   searchService
-    .search({
-      org_identifier: store.state.selectedOrganization.identifier,
-      query: req,
-      page_type: "logs",
-    }, "RUM")
+    .search(
+      {
+        org_identifier: store.state.selectedOrganization.identifier,
+        query: req,
+        page_type: "logs",
+      },
+      "RUM"
+    )
     .then((res) => {
       res.data.hits.forEach((hit: any) => {
         sessionState.data.sessions[hit.session_id] = hit;
@@ -489,11 +492,14 @@ const getSessionLogs = (req: any) => {
 
   isLoading.value.push(true);
   searchService
-    .search({
-      org_identifier: store.state.selectedOrganization.identifier,
-      query: req,
-      page_type: "logs",
-    }, "RUM")
+    .search(
+      {
+        org_identifier: store.state.selectedOrganization.identifier,
+        query: req,
+        page_type: "logs",
+      },
+      "RUM"
+    )
     .then((res) => {
       const hits = res.data.hits;
       hits.forEach((hit: any) => {

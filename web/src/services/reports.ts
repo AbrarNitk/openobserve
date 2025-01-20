@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,26 +24,45 @@ import http from "./http";
 // PUT /{org_id}/reports/{name}/trigger -- trigger report immediately
 
 const reports = {
-  list: (org_identifier: string) => {
-    return http().get(`/api/${org_identifier}/reports`);
+  list: (
+    org_identifier: string = "",
+    folder_id: string = "",
+    dashboard_id: string = "",
+    cache: boolean = false
+  ) => {
+    let query = "";
+
+    const params = [];
+    if (folder_id) params.push(`folder_id=${folder_id}`);
+    if (dashboard_id) params.push(`dashboard_id=${dashboard_id}`);
+    if (cache) params.push(`cache=${cache}`);
+    query = params.join("&");
+
+    return http().get(`/api/${org_identifier}/reports?${query}`);
   },
   getReport: (org_identifier: string, reportName: string) => {
-    return http().get(`/api/${org_identifier}/reports/${reportName}`);
+    return http().get(
+      `/api/${org_identifier}/reports/${encodeURIComponent(reportName)}`
+    );
   },
   createReport: (org_identifier: string, payload: any) => {
     return http().post(`/api/${org_identifier}/reports`, payload);
   },
   updateReport: (org_identifier: string, payload: any) => {
     return http().put(
-      `/api/${org_identifier}/reports/${payload.name}`,
+      `/api/${org_identifier}/reports/${encodeURIComponent(payload.name)}`,
       payload
     );
   },
   deleteReport: (org_identifier: string, reportName: string) => {
-    return http().delete(`/api/${org_identifier}/reports/${reportName}`);
+    return http().delete(
+      `/api/${org_identifier}/reports/${encodeURIComponent(reportName)}`
+    );
   },
   triggerReport: (org_identifier: string, reportName: string) => {
-    return http().put(`/api/${org_identifier}/reports/${reportName}/trigger`);
+    return http().put(
+      `/api/${org_identifier}/reports/${encodeURIComponent(reportName)}/trigger`
+    );
   },
   toggleReportState: (
     org_identifier: string,
@@ -51,7 +70,9 @@ const reports = {
     state: boolean
   ) => {
     return http().put(
-      `/api/${org_identifier}/reports/${reportName}/enable?value=${state}`
+      `/api/${org_identifier}/reports/${encodeURIComponent(
+        reportName
+      )}/enable?value=${state}`
     );
   },
 };

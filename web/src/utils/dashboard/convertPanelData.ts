@@ -1,4 +1,4 @@
-// Copyright 2023 Zinc Labs Inc.
+// Copyright 2023 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,9 +14,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { convertPromQLData } from "@/utils/dashboard/convertPromQLData";
-import { convertSQLData } from "@/utils/dashboard/convertSQLData";
+import {
+  convertMultiSQLData,
+  convertSQLData,
+} from "@/utils/dashboard/convertSQLData";
 import { convertTableData } from "@/utils/dashboard/convertTableData";
-import { convertMapData } from "@/utils/dashboard/convertMapData";
+import { convertGeoMapData } from "@/utils/dashboard/convertGeoMapData";
+import { convertMapsData } from "@/utils/dashboard/convertMapsData";
 import { convertSankeyData } from "./convertSankeyData";
 /**
  * Converts panel data based on the panel schema and data.
@@ -32,7 +36,8 @@ export const convertPanelData = async (
   chartPanelRef: any,
   hoveredSeriesState: any,
   resultMetaData: any,
-  metadata: any
+  metadata: any,
+  chartPanelStyle: any,
 ) => {
   // based on the panel config, using the switch calling the appropriate converter
   // based on panel Data chartType is taken for ignoring unnecessary api calls
@@ -63,23 +68,29 @@ export const convertPanelData = async (
             data,
             store,
             chartPanelRef,
-            hoveredSeriesState
+            hoveredSeriesState,
           )),
         };
       } else {
         // chartpanelref will be used to get width and height of the chart element from DOM
-        return {
-          chartType: panelSchema.type,
-          ...(await convertSQLData(
-            panelSchema,
-            data,
-            store,
-            chartPanelRef,
-            hoveredSeriesState,
-            resultMetaData,
-            metadata
-          )),
-        };
+        try {
+          return {
+            chartType: panelSchema.type,
+            ...(await convertMultiSQLData(
+              panelSchema,
+              data,
+              store,
+              chartPanelRef,
+              hoveredSeriesState,
+              resultMetaData,
+              metadata,
+              chartPanelStyle,
+            )),
+          };
+        } catch (error) {
+          console.error(error);
+          return {};
+        }
       }
     }
     case "table": {
@@ -91,7 +102,13 @@ export const convertPanelData = async (
     case "geomap": {
       return {
         chartType: panelSchema.type,
-        ...convertMapData(panelSchema, data),
+        ...convertGeoMapData(panelSchema, data),
+      };
+    }
+    case "maps": {
+      return {
+        chartType: panelSchema.type,
+        ...convertMapsData(panelSchema, data),
       };
     }
     case "sankey": {
@@ -101,7 +118,6 @@ export const convertPanelData = async (
       };
     }
     default: {
-      console.log("No Chart Type found, skipping");
       return {};
     }
   }

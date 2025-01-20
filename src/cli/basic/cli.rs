@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,7 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use config::utils::file::set_permission;
-use infra::file_list as infra_file_list;
+use infra::{file_list as infra_file_list, table};
 
 use crate::{
     cli::data::{
@@ -99,6 +99,14 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                         .help("migrate to: sqlite, etcd, mysql, postgresql"),
                 ]),
             clap::Command::new("migrate-dashboards").about("migrate-dashboards"),
+            clap::Command::new("migrate-pipeline").about("migrate pipelines")
+                .arg(
+                    clap::Arg::new("drop-table")
+                        .long("drop-table")
+                        .required(false)
+                        .num_args(0)
+                        .help("Drop existing Pipeline table first before migrating")
+                ),
             clap::Command::new("delete-parquet")
                 .about("delete parquet files from s3 and file_list")
                 .arg(
@@ -109,6 +117,16 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                         .help("the parquet file name"),
                 ),
             clap::Command::new("migrate-schemas").about("migrate from single row to row per schema version"),
+            clap::Command::new("seaorm-rollback").about("rollback SeaORM migration steps")
+                .subcommand(
+                    clap::Command::new("all")
+                    .about("rollback all SeaORM migration steps")
+                )
+                .subcommand(
+                    clap::Command::new("last")
+                    .about("rollback last N SeaORM migration steps")
+                    .arg(clap::Arg::new("N").help("number of migration steps to rollback (default is 1)").value_parser(clap::value_parser!(u32)))
+                ),
         ])
         .get_matches();
 
@@ -124,7 +142,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         match command.get_one::<String>("path") {
             Some(path) => {
                 set_permission(path, 0o777)?;
-                println!("init dir {} succeeded", path);
+                println!("init dir {} successfully", path);
             }
             None => {
                 return Err(anyhow::anyhow!("please set data path"));
@@ -161,10 +179,10 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                     db::user::reset().await?;
                 }
                 "alert" => {
-                    db::alerts::reset().await?;
+                    db::alerts::alert::reset().await?;
                 }
                 "dashboard" => {
-                    db::dashboards::reset().await?;
+                    table::dashboards::delete_all().await?;
                 }
                 "report" => {
                     db::dashboards::reports::reset().await?;
@@ -185,7 +203,10 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                         .expect("file list remote calculate stats failed");
                 }
                 _ => {
-                    return Err(anyhow::anyhow!("unsupport reset component: {}", component));
+                    return Err(anyhow::anyhow!(
+                        "unsupported reset component: {}",
+                        component
+                    ));
                 }
             }
         }
@@ -204,15 +225,11 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                     }
                 }
                 _ => {
-                    return Err(anyhow::anyhow!("unsupport reset component: {component}"));
+                    return Err(anyhow::anyhow!("unsupported reset component: {component}"));
                 }
             }
         }
         "migrate-file-list" => {
-            let prefix = match command.get_one::<String>("prefix") {
-                Some(prefix) => prefix.to_string(),
-                None => "".to_string(),
-            };
             let from = match command.get_one::<String>("from") {
                 Some(from) => from.to_string(),
                 None => "".to_string(),
@@ -221,11 +238,8 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                 Some(to) => to.to_string(),
                 None => "".to_string(),
             };
-            println!(
-                "Running migration file_list from {} to {}, with prefix: {}",
-                from, to, prefix
-            );
-            migration::file_list::run(&prefix, &from, &to).await?;
+            println!("Running migration file_list from {} to {}", from, to);
+            migration::file_list::run(&from, &to).await?;
         }
         "migrate-meta" => {
             let from = match command.get_one::<String>("from") {
@@ -243,11 +257,16 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
             println!("Running migration dashboard");
             migration::dashboards::run().await?
         }
+        "migrate-pipeline" => {
+            println!("Running migration pipeline");
+            let drop_table = command.get_flag("drop-table");
+            migration::pipeline_func::run(drop_table).await?;
+        }
         "delete-parquet" => {
             let file = command.get_one::<String>("file").unwrap();
             match file_list::delete_parquet_file(file, true).await {
                 Ok(_) => {
-                    println!("delete parquet file {} succeeded", file);
+                    println!("delete parquet file {} successfully", file);
                 }
                 Err(e) => {
                     println!("delete parquet file {} failed, error: {}", file, e);
@@ -262,10 +281,31 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         }
         "migrate-schemas" => {
             println!("Running schema migration to row per schema version");
+            #[allow(deprecated)]
             migration::schema::run().await?
         }
+        "seaorm-rollback" => match command.subcommand() {
+            Some(("all", _)) => {
+                println!("Rolling back all");
+                infra::table::down(None).await?
+            }
+            Some(("last", sub_matches)) => {
+                let n = sub_matches
+                    .get_one::<u32>("N")
+                    .map(|n| n.to_owned())
+                    .unwrap_or(1);
+                println!("Rolling back {n}");
+                infra::table::down(Some(n)).await?
+            }
+            Some((name, _)) => {
+                return Err(anyhow::anyhow!("unsupported sub command: {name}"));
+            }
+            None => {
+                return Err(anyhow::anyhow!("missing sub command"));
+            }
+        },
         _ => {
-            return Err(anyhow::anyhow!("unsupport sub command: {name}"));
+            return Err(anyhow::anyhow!("unsupported sub command: {name}"));
         }
     }
 
@@ -275,6 +315,6 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         log::error!("waiting for db close failed, error: {}", e);
     }
 
-    println!("command {name} execute succeeded");
+    println!("command {name} execute successfully");
     Ok(true)
 }

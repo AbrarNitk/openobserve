@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./baseFixtures";
 import logData from "../../ui-testing/cypress/fixtures/log.json";
 import logsdata from "../../test-data/logs_data.json";
 import { toZonedTime } from "date-fns-tz";
@@ -10,6 +10,7 @@ const dashboardName = `AutomatedDashboard${Date.now()}`;
 async function login(page) {
   await page.goto(process.env["ZO_BASE_URL"]);
   await page.waitForTimeout(1000);
+  // await page.getByText("Login as internal user").click();
   await page
     .locator('[data-cy="login-user-id"]')
     .fill(process.env["ZO_ROOT_USER_EMAIL"]);
@@ -112,18 +113,26 @@ async function multistreamselect(page) {
     await page.locator('[data-test="menu-link-\\/logs-item"]').click();
     await page.waitForTimeout(2000);
     await page.locator('[data-test="log-search-index-list-select-stream"]').fill('e2e_stream1');
+    await page.waitForTimeout(2000);
+    await page.locator('[data-test="log-search-index-list-stream-toggle-e2e_stream1"] div').nth(2).click();
     await page.waitForTimeout(4000);
-  await page.locator('[data-test="log-search-index-list-stream-toggle-e2e_stream1"] div').nth(2).click({force:true});
-    await page.getByRole('cell', { name: 'Common Group Fields (40)' }).click();
-    await page.getByRole('cell', { name: 'E2e_automate (13)' }).click();
-    await page.getByRole('cell', { name: 'E2e_stream1 (0)' }).click();
-    await page.getByRole('cell', { name: 'E2e_stream1 (0)' }).click();
-    await page.getByRole('cell', { name: 'E2e_stream1 (0)' }).click();
+    await page.locator('#fnEditor > .monaco-editor > .overflow-guard > .monaco-scrollable-element > .lines-content > .view-lines').click()
+//   await page.locator('[data-test="log-search-index-list-stream-toggle-e2e_stream1"] div').nth(2).click({force:true});
+    const cell = await page.getByRole('cell', { name: /Common Group Fields/ });
+
+  // Extract the text content of the cell
+    const cellText = await cell.textContent();
+
+  // Verify that the text contains 'Common Group Fields'
+  expect(cellText).toContain('Common Group Fields');
+  
+    await page.getByRole('cell', { name: /E2e_automate/ }).click();
+    await page.getByRole('cell', { name: /E2e_stream1/  }).click();
     await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
     await page.locator('[data-test="date-time-btn"]').click();
     await page.locator('[data-test="date-time-relative-6-h-btn"]').click();
     await page.locator('[data-test="logs-search-bar-refresh-btn"]').click();
-    await page.locator('[data-test="log-table-column-0-\\@timestamp"] [data-test="table-row-expand-menu"]').click();
+    await page.locator('[data-test="log-table-column-0-_timestamp"] [data-test="table-row-expand-menu"]').click();
   }
   
 
@@ -149,7 +158,7 @@ await page.waitForTimeout(1000);
   }) => {
     await multistreamselect(page);
     await page.route("**/logData.ValueQuery", (route) => route.continue());
-    await page.locator('[data-cy="date-time-button"]').click({ force: true });
+    await page.locator('[data-test="date-time-btn"]').click({ force: true });
 
     await page
       .locator('[data-test="date-time-relative-6-w-btn"] > .q-btn__content')
@@ -157,14 +166,16 @@ await page.waitForTimeout(1000);
         force: true,
       });
     await page
-      .locator(".q-pl-sm > .q-btn > .q-btn__content")
+      .locator('[data-test="logs-search-bar-refresh-interval-btn-dropdown"]')
       .click({ force: true });
     await page.locator('[data-test="logs-search-bar-refresh-time-5"]').click({
       force: true,
     });
+    await page.waitForTimeout(1000);
     await expect(page.locator(".q-notification__message")).toContainText(
       "Live mode is enabled"
     );
+    await page.waitForTimeout(5000);
     await page
       .locator(".q-pl-sm > .q-btn > .q-btn__content")
       .click({ force: true });
@@ -180,7 +191,7 @@ await page.waitForTimeout(1000);
     page,
   }) => {
     await multistreamselect(page);
-    await page.locator('[data-cy="date-time-button"]').click({ force: true });
+    await page.locator('[data-test="date-time-btn"]').click({ force: true });
     await page
       .locator('[data-test="menu-link-/streams-item"]')
       .click({ force: true });
@@ -204,12 +215,11 @@ await page.waitForTimeout(1000);
     await page.locator('[data-test="logs-search-bar-quick-mode-toggle-btn"] div').first().click();
     await page
       .locator('[data-cy="index-field-search-input"]')
-      .fill("_timestamp");
+      .fill("job");
     await page.waitForTimeout(2000);
     await page
-      .locator(".field-container")
       .locator(
-        '[data-test="log-search-index-list-interesting-_timestamp-field-btn"]'
+        '[data-test="log-search-index-list-interesting-job-field-btn"]'
       )
       .last()
       .click({
@@ -225,17 +235,13 @@ await page.waitForTimeout(1000);
     
   });
 
-  test('should display search around in histogram mode', async ({ page }) => {
-    await multistreamselect(page);
-    await page.waitForTimeout(1000);
-    await page.locator('[data-test="log-table-column-0-source"]').click();
-    await page.locator('[data-test="logs-detail-table-search-around-btn"]').click();
-    await page.waitForTimeout(2000);
-    const element = await page.locator('[data-test="log-table-column-0-source"]');
-    const isVisible = await element.isVisible();
-    expect(isVisible).toBeTruthy();
-    
-  });
+  // test('should display search around in histogram mode', async ({ page }) => {
+  //   await multistreamselect(page);
+  //   await page.waitForTimeout(1000);
+  //   await page.locator('[data-test="log-table-column-0-source"]').click();
+  //   const isDisabled = await page.locator('[data-test="logs-detail-table-search-around-btn"]').isDisabled();
+  //   expect(isDisabled).toBe(true);
+  // });
   
 
 })

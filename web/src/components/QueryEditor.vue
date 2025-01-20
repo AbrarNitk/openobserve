@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -34,12 +34,12 @@ import {
   onUnmounted,
   onActivated,
   watch,
+  computed,
 } from "vue";
 
 import "monaco-editor/esm/vs/editor/editor.all.js";
-import "monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js";
-import "monaco-editor/esm/vs/basic-languages/sql/sql.js";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import { vrlLanguageDefinition } from "@/utils/query/vrlLanguageDefinition";
 
 import { useStore } from "vuex";
 import { debounce } from "quasar";
@@ -84,6 +84,7 @@ export default defineComponent({
   setup(props, { emit }) {
     const store = useStore();
     const editorRef: any = ref();
+    // editor object is used to interact with the monaco editor instance
     let editorObj: any = null;
     const { searchObj } = useLogs();
 
@@ -125,7 +126,7 @@ export default defineComponent({
       });
     };
 
-    onMounted(async () => {
+    const setupEditor = async () => {
       monaco.editor.defineTheme("myCustomTheme", {
         base: "vs", // can also be vs-dark or hc-black
         inherit: true, // can also be false to completely replace the builtin rules
@@ -140,22 +141,36 @@ export default defineComponent({
         },
       });
 
+      // Dispose the provider if it already exists before registering a new one
+      provider.value?.dispose();
       registerAutoCompleteProvider();
 
-      const editorElement = document.getElementById(props.editorId);
+      let editorElement = document.getElementById(props.editorId);
+      let retryCount = 0;
+      const maxRetries = 5;
+
+      // Retry mechanism to ensure the editor element is found
+      while (!editorElement && retryCount < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 100)); // Wait for 100ms
+        editorElement = document.getElementById(props.editorId);
+        retryCount++;
+      }
 
       if (!editorElement) {
-        console.error("Query Editor element not found");
+        console.error("Query Editor element not found after retries");
         return;
       }
+
       if (editorElement && editorElement?.hasChildNodes()) return;
 
       editorObj = monaco.editor.create(editorElement as HTMLElement, {
-        value: props.query,
+        value: props.query?.trim(),
         language: props.language,
         theme: store.state.theme == "dark" ? "vs-dark" : "myCustomTheme",
-        showFoldingControls: "never",
+        showFoldingControls: enableCodeFolding.value ? "always" : "never",
+        folding: enableCodeFolding.value,
         wordWrap: "on",
+        automaticLayout: true,
         lineNumbers: "on",
         lineNumbersMinChars: 0,
         overviewRulerLanes: 0,
@@ -165,7 +180,6 @@ export default defineComponent({
         hideCursorInOverviewRuler: true,
         renderLineHighlight: "none",
         glyphMargin: false,
-        folding: false,
         scrollBeyondLastColumn: 0,
         scrollBeyondLastLine: false,
         smoothScrolling: true,
@@ -179,13 +193,14 @@ export default defineComponent({
         },
         minimap: { enabled: false },
         readOnly: props.readOnly,
+        renderValidationDecorations: "on",
       });
 
       editorObj.onDidChangeModelContent(
         debounce((e: any) => {
-          emit("update-query", e, editorObj.getValue());
-          emit("update:query", editorObj.getValue());
-        }, props.debounceTime)
+          emit("update-query", e, editorObj.getValue()?.trim());
+          emit("update:query", editorObj.getValue()?.trim());
+        }, props.debounceTime),
       );
 
       editorObj.createContextKey("ctrlenter", true);
@@ -196,7 +211,7 @@ export default defineComponent({
             emit("run-query");
           }, 300);
         },
-        "ctrlenter"
+        "ctrlenter",
       );
 
       editorObj.onDidFocusEditorWidget(() => {
@@ -204,18 +219,68 @@ export default defineComponent({
       });
 
       editorObj.onDidBlurEditorWidget(() => {
+        setValue(editorObj.getValue()?.trim());
         emit("blur");
       });
 
       window.addEventListener("click", () => {
-        editorObj.layout();
+        editorObj?.layout();
       });
+
+      window.addEventListener("resize", async () => {
+        await nextTick();
+        editorObj?.layout();
+        // queryEditorRef.value.resetEditorLayout();
+      });
+    };
+
+    onMounted(async () => {
+      provider.value?.dispose();
+      if (props.language === "vrl") {
+        monaco.languages.register({ id: "vrl" });
+
+        // Register a tokens provider for the language
+        monaco.languages.setMonarchTokensProvider(
+          "vrl",
+          vrlLanguageDefinition as any,
+        );
+      }
+
+      if (props.language === "sql") {
+        await import(
+          "monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js"
+        );
+      }
+
+      if (props.language === "json") {
+        await import(
+          "monaco-editor/esm/vs/language/json/monaco.contribution.js"
+        );
+      }
+
+      if (props.language === "html") {
+        await import(
+          "monaco-editor/esm/vs/language/html/monaco.contribution.js"
+        );
+      }
+
+      if (props.language === "markdown") {
+        await import(
+          "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"
+        );
+      }
+
+      setupEditor();
     });
 
     onActivated(async () => {
-      provider.value?.dispose();
-      registerAutoCompleteProvider();
-      editorObj.layout();
+      if (!editorObj) {
+        setupEditor();
+        editorObj?.layout();
+      } else {
+        provider.value?.dispose();
+        registerAutoCompleteProvider();
+      }
     });
 
     onDeactivated(() => {
@@ -226,37 +291,41 @@ export default defineComponent({
       provider.value?.dispose();
     });
 
+    const enableCodeFolding = computed(() => {
+      return ["json", "html"].includes(props.language);
+    });
+
     // update readonly when prop value changes
     watch(
       () => props.readOnly,
       () => {
         editorObj.updateOptions({ readOnly: props.readOnly });
-      }
+      },
     );
 
     watch(
       () => store.state.theme,
       () => {
         monaco.editor.setTheme(
-          store.state.theme == "dark" ? "vs-dark" : "myCustomTheme"
+          store.state.theme == "dark" ? "vs-dark" : "myCustomTheme",
         );
-      }
+      },
     );
 
     // update readonly when prop value changes
     watch(
       () => props.query,
       () => {
-        if (props.readOnly || !editorObj.hasWidgetFocus()) {
-          editorObj.getModel().setValue(props.query);
+        if (props.readOnly || !editorObj?.hasWidgetFocus()) {
+          editorObj?.getModel().setValue(props.query);
         }
-      }
+      },
     );
 
     const setValue = (value: string) => {
       if (editorObj?.setValue) {
         editorObj.setValue(value);
-        editorObj.layout();
+        editorObj?.layout();
       }
     };
 
@@ -305,12 +374,12 @@ export default defineComponent({
               suggestions: filteredSuggestions,
             };
           },
-        }
+        },
       );
     };
 
     const resetEditorLayout = () => {
-      editorObj.layout();
+      editorObj?.layout();
     };
 
     const triggerAutoComplete = async (value: string) => {
@@ -329,11 +398,111 @@ export default defineComponent({
       editorRef.value.dispatchEvent(escEvent);
     };
 
+    const formatDocument = async () => {
+      // As Monaco editor does not support formatting in read-only mode, we need to temporarily disable it while formatting
+      return new Promise((resolve) => {
+        editorObj.updateOptions({ readOnly: false });
+        editorObj
+          .getAction("editor.action.formatDocument")
+          .run()
+          .then(() => {
+            editorObj.updateOptions({ readOnly: props.readOnly });
+            resolve(true);
+          })
+          .catch(() => {
+            editorObj.updateOptions({ readOnly: props.readOnly });
+            resolve(false);
+          });
+      });
+    };
+
     const getCursorIndex = () => {
       const currentPosition = editorObj.getPosition();
-      const cursorIndex = editorObj.getModel().getOffsetAt(currentPosition) - 1;
+      const cursorIndex =
+        editorObj?.getModel().getOffsetAt(currentPosition) - 1;
       return cursorIndex || null;
     };
+
+    const getModel = () => {
+      return editorObj?.getModel();
+    };
+
+    const getValue = () => {
+      return editorObj?.getValue();
+    };
+
+    const decorateRanges = (ranges: any[]) => {
+      // Highlight the ranges
+      const decorations = ranges.map((range) => {
+        return {
+          range: new monaco.Range(range.startLine, 1, range.endLine, 1),
+          options: {
+            isWholeLine: true,
+            className: "highlight-error", // Add this class to style the highlighted lines
+            glyphMarginClassName: "error-glyph", // Optional: add a custom icon to the gutter
+          },
+        };
+      });
+
+      console.log("decorations", decorations);
+
+      const decorationIds = editorObj.deltaDecorations([], decorations);
+      console.log("decorationIds", decorationIds);
+    };
+
+    function addErrorDiagnostics(ranges: any) {
+      // const markers = [
+      //   {
+      //     resource: {
+      //       $mid: 1,
+      //       external: "inmemory://model/4",
+      //       path: "/4",
+      //       scheme: "inmemory",
+      //       authority: "model",
+      //     },
+      //     owner: "owner",
+      //     code: "MY_ERROR_CODE",
+      //     severity: monaco.MarkerSeverity.Error,
+      //     message: "Error: Something went wrong",
+      //     startLineNumber: 2,
+      //     startColumn: 1,
+      //     endLineNumber: 7,
+      //     endColumn: 1,
+      //   },
+      //   {
+      //     resource: {
+      //       $mid: 1,
+      //       external: "inmemory://model/4",
+      //       path: "/4",
+      //       scheme: "inmemory",
+      //       authority: "model",
+      //     },
+      //     owner: "owner",
+      //     code: "MY_ERROR_CODE",
+      //     severity: monaco.MarkerSeverity.Error,
+      //     message: "Error: Something went wrong",
+      //     startLineNumber: 8,
+      //     startColumn: 1,
+      //     endLineNumber: 13,
+      //     endColumn: 1,
+      //   },
+      // ];
+
+      // Set markers to the model
+      // monaco.editor.setModelMarkers(getModel(), "owner", markers);
+      const markers = ranges.map((range: any) => ({
+        severity: monaco.MarkerSeverity.Error, // Mark as error
+        startLineNumber: range.startLine,
+        startColumn: 1, // Start of the line
+        endLineNumber: range.endLine,
+        endColumn: 1, // End of the line
+        message: range.error, // The error message
+        code: "", // Optional error code
+      }));
+
+      monaco.editor.setModelMarkers(getModel(), "owner", []);
+      monaco.editor.setModelMarkers(getModel(), "owner", markers);
+    }
 
     return {
       editorRef,
@@ -344,6 +513,11 @@ export default defineComponent({
       triggerAutoComplete,
       getCursorIndex,
       searchObj,
+      formatDocument,
+      getModel,
+      getValue,
+      decorateRanges,
+      addErrorDiagnostics,
     };
   },
 });
@@ -369,5 +543,11 @@ export default defineComponent({
       visibility: visible !important;
     }
   }
+}
+
+.highlight-error {
+  background-color: rgba(255, 0, 0, 0.1);
+  text-decoration: underline;
+  text-decoration-color: red;
 }
 </style>

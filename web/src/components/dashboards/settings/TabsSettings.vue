@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -52,6 +52,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           v-for="(tab, index) in currentDashboardData.data.tabs"
           :key="index"
           class="draggable-row"
+          data-test="dashboard-tab-settings-draggable-row"
         >
           <div class="draggable-handle">
             <q-icon
@@ -131,11 +132,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     </div>
 
     <!-- add tab dialog -->
-    <q-dialog v-model="showAddTabDialog" position="right" full-height maximized>
+    <q-dialog v-model="showAddTabDialog" position="right" full-height maximized data-test="dashboard-tab-settings-add-tab-dialog">
       <AddTab
         :edit-mode="isTabEditMode"
         :tabId="selectedTabIdToEdit"
-        :dashboardData="currentDashboardData.data"
+        :dashboard-id="currentDashboardData.data.dashboardId"
         @refresh="refreshRequired"
       />
     </q-dialog>
@@ -157,7 +158,6 @@ import { VueDraggableNext } from "vue-draggable-next";
 import { useI18n } from "vue-i18n";
 import DashboardHeader from "./common/DashboardHeader.vue";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
 import { deleteTab, editTab, getDashboard } from "@/utils/commons";
 import { useRoute } from "vue-router";
 import { outlinedDelete } from "@quasar/extras/material-icons-outlined";
@@ -166,6 +166,7 @@ import { onMounted } from "vue";
 import AddTab from "@/components/dashboards/tabs/AddTab.vue";
 import TabsDeletePopUp from "./TabsDeletePopUp.vue";
 import { updateDashboard } from "../../../utils/commons";
+import useNotifications from "@/composables/useNotifications";
 
 export default defineComponent({
   name: "TabsSettings",
@@ -178,7 +179,6 @@ export default defineComponent({
   emits: ["refresh"],
   setup(props, { emit }) {
     const store = useStore();
-    const $q = useQuasar();
     const route = useRoute();
 
     const showAddTabDialog = ref(false);
@@ -199,7 +199,11 @@ export default defineComponent({
         route.query.folder ?? "default"
       );
     };
-
+    const {
+      showPositiveNotification,
+      showErrorNotification,
+      showConfictErrorNotificationWithRefreshBtn,
+    } = useNotifications();
     onMounted(async () => {
       await getDashboardData();
     });
@@ -227,17 +231,19 @@ export default defineComponent({
         // emit refresh to rerender
         emit("refresh");
 
-        $q.notify({
-          type: "positive",
-          message: "Dashboard updated successfully.",
+        showPositiveNotification("Dashboard updated successfully.", {
           timeout: 2000,
         });
       } catch (error: any) {
-        $q.notify({
-          type: "negative",
-          message: error?.message ?? "Tab reorder failed",
-        });
-
+        if (error?.response?.status === 409) {
+          showConfictErrorNotificationWithRefreshBtn(
+            error?.response?.data?.message ??
+              error?.message ??
+              "Tab reorder failed"
+          );
+        } else {
+          showErrorNotification(error?.message ?? "Tab reorder failed");
+        }
         // emit refresh to rerender
         emit("refresh");
         await getDashboardData();
@@ -269,21 +275,23 @@ export default defineComponent({
           emit("refresh");
           await getDashboardData();
 
-          $q.notify({
-            type: "positive",
-            message: "Tab updated successfully",
+          showPositiveNotification("Tab updated successfully", {
             timeout: 2000,
           });
-
           // reset edit mode
           editTabId.value = null;
           editTabObj.data = {};
         }
       } catch (error: any) {
-        $q.notify({
-          type: "negative",
-          message: error?.message ?? "Tab updation failed",
-        });
+        if (error?.response?.status === 409) {
+          showConfictErrorNotificationWithRefreshBtn(
+            error?.response?.data?.message ??
+              error?.message ??
+              "Tab updation failed"
+          );
+        } else {
+          showErrorNotification(error?.message ?? "Tab updation failed");
+        }
 
         // emit refresh to rerender
         emit("refresh");
@@ -326,17 +334,22 @@ export default defineComponent({
 
         tabIdToBeDeleted.value = null;
         deletePopupVisible.value = false;
-        $q.notify({
-          type: "positive",
-          message: "Tab deleted successfully",
+
+        showPositiveNotification("Tab deleted successfully", {
           timeout: 2000,
         });
       } catch (error: any) {
-        $q.notify({
-          type: "negative",
-          message: error?.message ?? "Tab deletion failed",
-          timeout: 2000,
-        });
+        if (error?.response?.status === 409) {
+          showConfictErrorNotificationWithRefreshBtn(
+            error?.response?.data?.message ??
+              error?.message ??
+              "Tab deletion failed"
+          );
+        } else {
+          showErrorNotification(error?.message ?? "Tab deletion failed", {
+            timeout: 2000,
+          });
+        }
       }
     };
 

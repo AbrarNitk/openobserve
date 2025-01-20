@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,14 +15,11 @@
 
 use std::sync::Arc;
 
-use config::utils::json;
+use config::{meta::alerts::templates::Template, utils::json};
 use itertools::Itertools;
 
 use crate::{
-    common::{
-        infra::config::ALERTS_TEMPLATES,
-        meta::{alerts::templates::Template, organization::DEFAULT_ORG},
-    },
+    common::{infra::config::ALERTS_TEMPLATES, meta::organization::DEFAULT_ORG},
     service::db,
 };
 

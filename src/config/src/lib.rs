@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -28,7 +28,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
 
     // initialize chrome launch options, so that if chrome download is
     // needed, it will happen now and not during serving report API
-    if cluster::is_alert_manager(&cluster::LOCAL_NODE_ROLE) {
+    if cluster::LOCAL_NODE.is_alert_manager() {
         let _ = get_chrome_launch_options().await;
     }
     Ok(())

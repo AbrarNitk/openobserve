@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,7 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <template>
   <date-time
     ref="dateTimePicker"
-    auto-apply
+    :auto-apply="autoApplyDashboard"
     :default-type="modelValue.valueType"
     :default-absolute-time="{
       startTime: modelValue.startTime,
@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     :default-relative-time="modelValue.relativeTimePeriod"
     @on:date-change="updateDateTime"
     :initialTimezone="initialTimezone"
+    :disable="disable"
   >
   </date-time>
 </template>
@@ -51,6 +52,14 @@ export default defineComponent({
     initialTimezone: {
       required: false,
       default: null,
+    },
+    disable: {
+      required: false,
+      default: false,
+    },
+    autoApplyDashboard: {
+      required: false,
+      default: false,
     },
   },
   emits: ["update:modelValue"],

@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,14 +13,22 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{cmp::max, collections::HashMap, net::SocketAddr, str::FromStr, time::Duration};
+use std::{
+    cmp::max,
+    collections::HashMap,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use actix_web::{dev::ServerHandle, http::KeepAlive, middleware, web, App, HttpServer};
 use actix_web_opentelemetry::RequestTracing;
-use config::{
-    cluster::{is_router, LOCAL_NODE_ROLE},
-    get_config,
-};
+use arrow_flight::flight_service_server::FlightServiceServer;
+use config::get_config;
 use log::LevelFilter;
 use openobserve::{
     cli::basic::cli,
@@ -32,39 +40,45 @@ use openobserve::{
     handler::{
         grpc::{
             auth::check_auth,
+            flight::FlightServiceImpl,
             request::{
                 event::Eventer,
-                file_list::Filelister,
+                ingest::Ingester,
                 logs::LogsServer,
-                metrics::{ingester::Ingester, querier::Querier},
+                metrics::{ingester::MetricsIngester, querier::MetricsQuerier},
+                query_cache::QueryCacheServerImpl,
                 traces::TraceServer,
-                usage::UsageServerImpl,
             },
         },
         http::router::*,
     },
     job, router,
-    service::{db, metadata, search::SEARCH_SERVER, usage},
+    service::{db, metadata, search::SEARCH_SERVER, self_reporting},
 };
-use opentelemetry::KeyValue;
+use opentelemetry::{global, trace::TracerProvider, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_proto::tonic::collector::{
     logs::v1::logs_service_server::LogsServiceServer,
     metrics::v1::metrics_service_server::MetricsServiceServer,
     trace::v1::trace_service_server::TraceServiceServer,
 };
-use opentelemetry_sdk::{propagation::TraceContextPropagator, trace as sdktrace, Resource};
+use opentelemetry_sdk::{propagation::TraceContextPropagator, Resource};
 use proto::cluster_rpc::{
-    event_server::EventServer, filelist_server::FilelistServer, metrics_server::MetricsServer,
-    search_server::SearchServer, usage_server::UsageServer,
+    event_server::EventServer, ingest_server::IngestServer, metrics_server::MetricsServer,
+    query_cache_server::QueryCacheServer, search_server::SearchServer,
 };
 #[cfg(feature = "profiling")]
 use pyroscope::PyroscopeAgent;
 #[cfg(feature = "profiling")]
 use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 use tokio::sync::oneshot;
-use tonic::codec::CompressionEncoding;
+use tonic::{
+    codec::CompressionEncoding,
+    metadata::{MetadataKey, MetadataMap, MetadataValue},
+    transport::{Identity, ServerTlsConfig},
+};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::Registry;
 
 #[cfg(feature = "mimalloc")]
@@ -75,6 +89,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use openobserve::service::tls::http_tls_config;
 use tracing_subscriber::{
     filter::LevelFilter as TracingLevelFilter, fmt::Layer, prelude::*, EnvFilter,
 };
@@ -97,15 +112,6 @@ async fn main() -> Result<(), anyhow::Error> {
             .parse::<SocketAddr>()?,
         )
         .init();
-
-    // let tokio steal the thread
-    let rt_handle = tokio::runtime::Handle::current();
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(10));
-            rt_handle.spawn(std::future::ready(()));
-        }
-    });
 
     // setup profiling
     #[cfg(feature = "profiling")]
@@ -159,50 +165,159 @@ async fn main() -> Result<(), anyhow::Error> {
     log::info!("Starting OpenObserve {}", VERSION);
     log::info!(
         "System info: CPU cores {}, MEM total {} MB, Disk total {} GB, free {} GB",
-        cfg.limit.cpu_num,
+        cfg.limit.real_cpu_num,
         cfg.limit.mem_total / 1024 / 1024,
         cfg.limit.disk_total / 1024 / 1024 / 1024,
         cfg.limit.disk_free / 1024 / 1024 / 1024,
     );
 
-    // it must be initialized before the server starts
-    cluster::register_and_keepalive()
-        .await
-        .expect("cluster init failed");
-    // init config
-    config::init().await.expect("config init failed");
-    // init infra
-    infra::init().await.expect("infra init failed");
-    common_infra::init()
-        .await
-        .expect("common infra init failed");
+    // init backend jobs
+    let (job_init_tx, job_init_rx) = oneshot::channel();
+    let (job_shutudown_tx, job_shutdown_rx) = oneshot::channel();
+    let (job_stopped_tx, job_stopped_rx) = oneshot::channel();
+    let job_rt_handle = std::thread::spawn(move || {
+        let cfg = get_config();
+        let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(cfg.limit.job_runtime_worker_num)
+            .enable_all()
+            .thread_name("job_runtime")
+            .max_blocking_threads(cfg.limit.job_runtime_blocking_worker_num)
+            .build()
+        else {
+            job_init_tx.send(false).ok();
+            panic!("job runtime init failed")
+        };
+        let _guard = rt.enter();
+        rt.block_on(async move {
+            // it must be initialized before the server starts
+            if let Err(e) = cluster::register_and_keep_alive().await {
+                job_init_tx.send(false).ok();
+                panic!("cluster init failed: {}", e);
+            }
+            // init config
+            if let Err(e) = config::init().await {
+                job_init_tx.send(false).ok();
+                panic!("config init failed: {}", e);
+            }
+            // init infra
+            if let Err(e) = infra::init().await {
+                job_init_tx.send(false).ok();
+                panic!("infra init failed: {}", e);
+            }
+            if let Err(e) = common_infra::init().await {
+                job_init_tx.send(false).ok();
+                panic!("common infra init failed: {}", e);
+            }
 
-    // init enterprise
-    #[cfg(feature = "enterprise")]
-    o2_enterprise::enterprise::init()
-        .await
-        .expect("enerprise init failed");
+            // init enterprise
+            #[cfg(feature = "enterprise")]
+            if let Err(e) = init_enterprise().await {
+                job_init_tx.send(false).ok();
+                panic!("enerprise init failed: {}", e);
+            }
 
-    // check version upgrade
-    let old_version = db::version::get().await.unwrap_or("v0.0.0".to_string());
-    migration::check_upgrade(&old_version, VERSION).await?;
-    // migrate dashboards
-    migration::dashboards::run().await?;
+            // check version upgrade
+            let old_version = db::version::get().await.unwrap_or("v0.0.0".to_string());
+            if let Err(e) = migration::check_upgrade(&old_version, VERSION).await {
+                job_init_tx.send(false).ok();
+                panic!("check upgrade failed: {}", e);
+            }
 
-    // ingester init
-    ingester::init().await.expect("ingester init failed");
+            #[allow(deprecated)]
+            migration::upgrade_resource_names()
+                .await
+                .expect("migrate resource names into supported ofga format failed");
 
-    // init job
-    job::init().await.expect("job init failed");
+            // migrate infra_sea_orm
+            if let Err(e) = infra::table::migrate().await {
+                job_init_tx.send(false).ok();
+                panic!("infra sea_orm migrate failed: {}", e);
+            }
 
-    // gRPC server
+            // migrate dashboards
+            if let Err(e) = migration::dashboards::run().await {
+                job_init_tx.send(false).ok();
+                panic!("migrate dashboards failed: {}", e);
+            }
+
+            // ingester init
+            if let Err(e) = ingester::init().await {
+                job_init_tx.send(false).ok();
+                panic!("ingester init failed: {}", e);
+            }
+
+            // init job
+            if let Err(e) = job::init().await {
+                job_init_tx.send(false).ok();
+                panic!("job init failed: {}", e);
+            }
+
+            // init meter provider
+            let Ok(meter_provider) = job::metrics::init_meter_provider().await else {
+                job_init_tx.send(false).ok();
+                panic!("meter provider init failed");
+            };
+
+            job_init_tx.send(true).ok();
+            job_shutdown_rx.await.ok();
+            job_stopped_tx.send(()).ok();
+
+            // shutdown meter provider
+            let _ = meter_provider.shutdown();
+
+            // flush distinct values
+            _ = metadata::close().await;
+            // flush WAL cache to disk
+            _ = ingester::flush_all().await;
+            common_infra::wal::flush_all_to_disk().await;
+            // flush compact offset cache to disk disk
+            _ = db::compact::files::sync_cache_to_db().await;
+            // flush db
+            let db = infra::db::get_db().await;
+            _ = db.close().await;
+        });
+    });
+
+    // wait for job init
+    match job_init_rx.await {
+        Ok(true) => log::info!("backend job init success"),
+        Ok(false) => {
+            return Err(anyhow::anyhow!("backend job init failed, exiting"));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("backend job init failed: {}", e));
+        }
+    }
+
+    // init gRPC server
+    let (grpc_init_tx, grpc_init_rx) = oneshot::channel();
     let (grpc_shutudown_tx, grpc_shutdown_rx) = oneshot::channel();
     let (grpc_stopped_tx, grpc_stopped_rx) = oneshot::channel();
-    if is_router(&LOCAL_NODE_ROLE) {
-        init_router_grpc_server(grpc_shutdown_rx, grpc_stopped_tx)?;
-    } else {
-        init_common_grpc_server(grpc_shutdown_rx, grpc_stopped_tx)?;
-    }
+    let grpc_rt_handle = std::thread::spawn(move || {
+        let cfg = get_config();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(cfg.limit.grpc_runtime_worker_num)
+            .enable_all()
+            .thread_name("grpc_runtime")
+            .max_blocking_threads(cfg.limit.grpc_runtime_blocking_worker_num)
+            .build()
+            .expect("grpc runtime init failed");
+        let _guard = rt.enter();
+        rt.block_on(async move {
+            if config::cluster::LOCAL_NODE.is_router() {
+                init_router_grpc_server(grpc_init_tx, grpc_shutdown_rx, grpc_stopped_tx)
+                    .await
+                    .expect("router gRPC server init failed");
+            } else {
+                init_common_grpc_server(grpc_init_tx, grpc_shutdown_rx, grpc_stopped_tx)
+                    .await
+                    .expect("router gRPC server init failed");
+            }
+        });
+    });
+
+    // wait for gRPC init
+    grpc_init_rx.await.ok();
 
     // let node online
     let _ = cluster::set_online(false).await;
@@ -234,8 +349,8 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     log::info!("HTTP server stopped");
 
-    // flush useage report
-    usage::flush().await;
+    // flush usage report
+    self_reporting::flush().await;
 
     // leave the cluster
     _ = cluster::leave().await;
@@ -244,17 +359,14 @@ async fn main() -> Result<(), anyhow::Error> {
     // stop gRPC server
     grpc_shutudown_tx.send(()).ok();
     grpc_stopped_rx.await.ok();
+    grpc_rt_handle.join().ok();
     log::info!("gRPC server stopped");
 
-    // flush WAL cache to disk
-    common_infra::wal::flush_all_to_disk().await;
-    // flush distinct values
-    _ = metadata::close().await;
-    // flush compact offset cache to disk disk
-    _ = db::compact::files::sync_cache_to_db().await;
-    // flush db
-    let db = infra::db::get_db().await;
-    _ = db.close().await;
+    // stop backend jobs
+    job_shutudown_tx.send(()).ok();
+    job_stopped_rx.await.ok();
+    job_rt_handle.join().ok();
+    log::info!("backend job stopped");
 
     // stop telemetry
     if cfg.common.telemetry_enabled {
@@ -263,18 +375,19 @@ async fn main() -> Result<(), anyhow::Error> {
             .await;
     }
 
-    log::info!("server stopped");
-
     #[cfg(feature = "profiling")]
     if let Some(agent) = agent {
         let agent_ready = agent.stop().unwrap();
         agent_ready.shutdown();
     }
 
+    log::info!("server stopped");
+
     Ok(())
 }
 
-fn init_common_grpc_server(
+async fn init_common_grpc_server(
+    init_tx: oneshot::Sender<()>,
     shutdown_rx: oneshot::Receiver<()>,
     stopped_tx: oneshot::Sender<()>,
 ) -> Result<(), anyhow::Error> {
@@ -290,51 +403,72 @@ fn init_common_grpc_server(
         .accept_compressed(CompressionEncoding::Gzip);
     let search_svc = SearchServer::new(SEARCH_SERVER.clone())
         .send_compressed(CompressionEncoding::Gzip)
-        .accept_compressed(CompressionEncoding::Gzip);
-    let filelist_svc = FilelistServer::new(Filelister)
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(cfg.grpc.max_message_size * 1024 * 1024)
+        .max_encoding_message_size(cfg.grpc.max_message_size * 1024 * 1024);
+    let metrics_svc = MetricsServer::new(MetricsQuerier)
         .send_compressed(CompressionEncoding::Gzip)
-        .accept_compressed(CompressionEncoding::Gzip);
-    let metrics_svc = MetricsServer::new(Querier)
-        .send_compressed(CompressionEncoding::Gzip)
-        .accept_compressed(CompressionEncoding::Gzip);
-    let metrics_ingest_svc = MetricsServiceServer::new(Ingester)
-        .send_compressed(CompressionEncoding::Gzip)
-        .accept_compressed(CompressionEncoding::Gzip);
-    let usage_svc = UsageServer::new(UsageServerImpl)
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(cfg.grpc.max_message_size * 1024 * 1024)
+        .max_encoding_message_size(cfg.grpc.max_message_size * 1024 * 1024);
+    let metrics_ingest_svc = MetricsServiceServer::new(MetricsIngester)
         .send_compressed(CompressionEncoding::Gzip)
         .accept_compressed(CompressionEncoding::Gzip);
     let logs_svc = LogsServiceServer::new(LogsServer)
         .send_compressed(CompressionEncoding::Gzip)
         .accept_compressed(CompressionEncoding::Gzip);
-    let tracer = TraceServer::default();
-    let trace_svc = TraceServiceServer::new(tracer)
+    let trace_svc = TraceServiceServer::new(TraceServer)
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(cfg.grpc.max_message_size * 1024 * 1024)
+        .max_encoding_message_size(cfg.grpc.max_message_size * 1024 * 1024);
+    let query_cache_svc = QueryCacheServer::new(QueryCacheServerImpl)
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip);
+    let ingest_svc = IngestServer::new(Ingester)
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip);
+    let flight_svc = FlightServiceServer::new(FlightServiceImpl)
         .send_compressed(CompressionEncoding::Gzip)
         .accept_compressed(CompressionEncoding::Gzip);
 
-    tokio::task::spawn(async move {
-        log::info!("starting gRPC server at {}", gaddr);
+    log::info!(
+        "starting gRPC server {} at {}",
+        if cfg.grpc.tls_enabled { "with TLS" } else { "" },
+        gaddr
+    );
+    init_tx.send(()).ok();
+    let builder = if cfg.grpc.tls_enabled {
+        let cert = std::fs::read_to_string(&cfg.grpc.tls_cert_path)?;
+        let key = std::fs::read_to_string(&cfg.grpc.tls_key_path)?;
+        let identity = Identity::from_pem(cert, key);
+        tonic::transport::Server::builder().tls_config(ServerTlsConfig::new().identity(identity))?
+    } else {
         tonic::transport::Server::builder()
-            .layer(tonic::service::interceptor(check_auth))
-            .add_service(event_svc)
-            .add_service(search_svc)
-            .add_service(filelist_svc)
-            .add_service(metrics_svc)
-            .add_service(metrics_ingest_svc)
-            .add_service(trace_svc)
-            .add_service(usage_svc)
-            .add_service(logs_svc)
-            .serve_with_shutdown(gaddr, async {
-                shutdown_rx.await.ok();
-                log::info!("gRPC server starts shutting down");
-            })
-            .await
-            .expect("gRPC server init failed");
-        stopped_tx.send(()).ok();
-    });
+    };
+    builder
+        .layer(tonic::service::interceptor(check_auth))
+        .add_service(event_svc)
+        .add_service(search_svc)
+        .add_service(metrics_svc)
+        .add_service(metrics_ingest_svc)
+        .add_service(trace_svc)
+        .add_service(logs_svc)
+        .add_service(query_cache_svc)
+        .add_service(ingest_svc)
+        .add_service(flight_svc)
+        .serve_with_shutdown(gaddr, async {
+            shutdown_rx.await.ok();
+            log::info!("gRPC server starts shutting down");
+        })
+        .await
+        .expect("gRPC server init failed");
+    stopped_tx.send(()).ok();
     Ok(())
 }
 
-fn init_router_grpc_server(
+async fn init_router_grpc_server(
+    init_tx: oneshot::Sender<()>,
     shutdown_rx: oneshot::Receiver<()>,
     stopped_tx: oneshot::Sender<()>,
 ) -> Result<(), anyhow::Error> {
@@ -356,21 +490,32 @@ fn init_router_grpc_server(
         .max_decoding_message_size(cfg.grpc.max_message_size * 1024 * 1024)
         .max_encoding_message_size(cfg.grpc.max_message_size * 1024 * 1024);
 
-    tokio::task::spawn(async move {
-        log::info!("starting gRPC server at {}", gaddr);
+    log::info!(
+        "starting gRPC server {} at {}",
+        if cfg.grpc.tls_enabled { "with TLS" } else { "" },
+        gaddr
+    );
+    init_tx.send(()).ok();
+    let builder = if cfg.grpc.tls_enabled {
+        let cert = std::fs::read_to_string(&cfg.grpc.tls_cert_path)?;
+        let key = std::fs::read_to_string(&cfg.grpc.tls_key_path)?;
+        let identity = Identity::from_pem(cert, key);
+        tonic::transport::Server::builder().tls_config(ServerTlsConfig::new().identity(identity))?
+    } else {
         tonic::transport::Server::builder()
-            .layer(tonic::service::interceptor(check_auth))
-            .add_service(logs_svc)
-            .add_service(metrics_svc)
-            .add_service(traces_svc)
-            .serve_with_shutdown(gaddr, async {
-                shutdown_rx.await.ok();
-                log::info!("gRPC server starts shutting down");
-            })
-            .await
-            .expect("gRPC server init failed");
-        stopped_tx.send(()).ok();
-    });
+    };
+    builder
+        .layer(tonic::service::interceptor(check_auth))
+        .add_service(logs_svc)
+        .add_service(metrics_svc)
+        .add_service(traces_svc)
+        .serve_with_shutdown(gaddr, async {
+            shutdown_rx.await.ok();
+            log::info!("gRPC server starts shutting down");
+        })
+        .await
+        .expect("gRPC server init failed");
+    stopped_tx.send(()).ok();
     Ok(())
 }
 
@@ -379,6 +524,7 @@ async fn init_http_server() -> Result<(), anyhow::Error> {
     // metrics
     let prometheus = config::metrics::create_prometheus_handler();
 
+    let thread_id = Arc::new(AtomicU16::new(0));
     let haddr: SocketAddr = if cfg.http.ipv6_enabled {
         format!("[::]:{}", cfg.http.port).parse()?
     } else {
@@ -392,14 +538,25 @@ async fn init_http_server() -> Result<(), anyhow::Error> {
 
     let server = HttpServer::new(move || {
         let cfg = get_config();
-        log::info!("starting HTTP server at: {}", haddr);
+        let local_id = thread_id.load(Ordering::SeqCst) as usize;
+        if cfg.common.feature_per_thread_lock {
+            thread_id.fetch_add(1, Ordering::SeqCst);
+        }
+        let scheme = if cfg.http.tls_enabled {
+            "HTTPS"
+        } else {
+            "HTTP"
+        };
+        log::info!(
+            "Starting {} server at: {}, thread_id: {}",
+            scheme,
+            haddr,
+            local_id
+        );
         let mut app = App::new().wrap(prometheus.clone());
-        if is_router(&LOCAL_NODE_ROLE) {
-            let client = awc::Client::builder()
-                .connector(awc::Connector::new().limit(cfg.route.max_connections))
-                .timeout(Duration::from_secs(cfg.route.timeout))
-                .disable_redirects()
-                .finish();
+        if config::cluster::LOCAL_NODE.is_router() {
+            let http_client =
+                router::http::create_http_client().expect("Failed to create http tls client");
             app = app
                 .service(
                     // if `cfg.common.base_uri` is empty, scope("") still works as expected.
@@ -413,7 +570,7 @@ async fn init_http_server() -> Result<(), anyhow::Error> {
                         .configure(get_basic_routes)
                         .configure(get_proxy_routes),
                 )
-                .app_data(web::Data::new(client))
+                .app_data(web::Data::new(http_client))
         } else {
             app = app.service(
                 web::scope(&cfg.common.base_uri)
@@ -426,19 +583,26 @@ async fn init_http_server() -> Result<(), anyhow::Error> {
         }
         app.app_data(web::JsonConfig::default().limit(cfg.limit.req_json_limit))
             .app_data(web::PayloadConfig::new(cfg.limit.req_payload_limit)) // size is in bytes
+            .app_data(web::Data::new(local_id))
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::new(
                 r#"%a "%r" %s %b "%{Content-Length}i" "%{Referer}i" "%{User-Agent}i" %T"#,
             ))
             .wrap(RequestTracing::new())
     })
-    .keep_alive(KeepAlive::Timeout(Duration::from_secs(max(
-        15,
-        cfg.limit.keep_alive,
-    ))))
-    .client_request_timeout(Duration::from_secs(max(5, cfg.limit.request_timeout)))
-    .shutdown_timeout(max(1, cfg.limit.shutdown_timeout))
-    .bind(haddr)?;
+    .keep_alive(if cfg.limit.keep_alive_disabled {
+        KeepAlive::Disabled
+    } else {
+        KeepAlive::Timeout(Duration::from_secs(max(1, cfg.limit.keep_alive)))
+    })
+    .client_request_timeout(Duration::from_secs(max(1, cfg.limit.request_timeout)))
+    .shutdown_timeout(max(1, cfg.limit.http_shutdown_timeout));
+    let server = if cfg.http.tls_enabled {
+        let sc = http_tls_config()?;
+        server.bind_rustls_0_23(haddr, sc)?
+    } else {
+        server.bind(haddr)?
+    };
 
     let server = server
         .workers(cfg.limit.http_worker_num)
@@ -458,6 +622,7 @@ async fn init_http_server_without_tracing() -> Result<(), anyhow::Error> {
     // metrics
     let prometheus = config::metrics::create_prometheus_handler();
 
+    let thread_id = Arc::new(AtomicU16::new(0));
     let haddr: SocketAddr = if cfg.http.ipv6_enabled {
         format!("[::]:{}", cfg.http.port).parse()?
     } else {
@@ -471,14 +636,27 @@ async fn init_http_server_without_tracing() -> Result<(), anyhow::Error> {
 
     let server = HttpServer::new(move || {
         let cfg = get_config();
-        log::info!("starting HTTP server at: {}", haddr);
+        let local_id = thread_id.load(Ordering::SeqCst) as usize;
+        if cfg.common.feature_per_thread_lock {
+            thread_id.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let scheme = if cfg.http.tls_enabled {
+            "HTTPS"
+        } else {
+            "HTTP"
+        };
+        log::info!(
+            "Starting {} server at: {}, thread_id: {}",
+            scheme,
+            haddr,
+            local_id
+        );
+
         let mut app = App::new().wrap(prometheus.clone());
-        if is_router(&LOCAL_NODE_ROLE) {
-            let client = awc::Client::builder()
-                .connector(awc::Connector::new().limit(cfg.route.max_connections))
-                .timeout(Duration::from_secs(cfg.route.timeout))
-                .disable_redirects()
-                .finish();
+        if config::cluster::LOCAL_NODE.is_router() {
+            let http_client =
+                router::http::create_http_client().expect("Failed to create http tls client");
             app = app
                 .service(
                     // if `cfg.common.base_uri` is empty, scope("") still works as expected.
@@ -492,7 +670,7 @@ async fn init_http_server_without_tracing() -> Result<(), anyhow::Error> {
                         .configure(get_basic_routes)
                         .configure(get_proxy_routes),
                 )
-                .app_data(web::Data::new(client))
+                .app_data(web::Data::new(http_client))
         } else {
             app = app.service(
                 web::scope(&cfg.common.base_uri)
@@ -505,18 +683,25 @@ async fn init_http_server_without_tracing() -> Result<(), anyhow::Error> {
         }
         app.app_data(web::JsonConfig::default().limit(cfg.limit.req_json_limit))
             .app_data(web::PayloadConfig::new(cfg.limit.req_payload_limit)) // size is in bytes
+            .app_data(web::Data::new(local_id))
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::new(
                 r#"%a "%r" %s %b "%{Content-Length}i" "%{Referer}i" "%{User-Agent}i" %T"#,
             ))
     })
-    .keep_alive(KeepAlive::Timeout(Duration::from_secs(max(
-        15,
-        cfg.limit.keep_alive,
-    ))))
-    .client_request_timeout(Duration::from_secs(max(5, cfg.limit.request_timeout)))
-    .shutdown_timeout(max(1, cfg.limit.shutdown_timeout))
-    .bind(haddr)?;
+    .keep_alive(if cfg.limit.keep_alive_disabled {
+        KeepAlive::Disabled
+    } else {
+        KeepAlive::Timeout(Duration::from_secs(max(1, cfg.limit.keep_alive)))
+    })
+    .client_request_timeout(Duration::from_secs(max(1, cfg.limit.request_timeout)))
+    .shutdown_timeout(max(1, cfg.limit.http_shutdown_timeout));
+    let server = if cfg.http.tls_enabled {
+        let sc = http_tls_config()?;
+        server.bind_rustls_0_23(haddr, sc)?
+    } else {
+        server.bind(haddr)?
+    };
 
     let server = server
         .workers(cfg.limit.http_worker_num)
@@ -625,24 +810,54 @@ pub(crate) fn setup_logs() -> tracing_appender::non_blocking::WorkerGuard {
 fn enable_tracing() -> Result<(), anyhow::Error> {
     let cfg = get_config();
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-    let mut headers = HashMap::new();
-    headers.insert(
-        cfg.common.tracing_header_key.clone(),
-        cfg.common.tracing_header_value.clone(),
-    );
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
+    let tracer = opentelemetry_otlp::new_pipeline().tracing();
+    let tracer = if cfg.common.otel_otlp_grpc_url.is_empty() {
+        tracer.with_exporter({
+            let mut headers = HashMap::new();
+            headers.insert(
+                cfg.common.tracing_header_key.clone(),
+                cfg.common.tracing_header_value.clone(),
+            );
             opentelemetry_otlp::new_exporter()
                 .http()
+                .with_http_client(
+                    reqwest::Client::builder()
+                        .danger_accept_invalid_certs(true)
+                        .build()?,
+                )
                 .with_endpoint(&cfg.common.otel_otlp_url)
-                .with_headers(headers),
-        )
-        .with_trace_config(sdktrace::config().with_resource(Resource::new(vec![
-            KeyValue::new("service.name", cfg.common.node_role.to_string()),
-            KeyValue::new("service.instance", cfg.common.instance_name.to_string()),
-            KeyValue::new("service.version", VERSION),
-        ])))
+                .with_headers(headers)
+        })
+    } else {
+        tracer.with_exporter({
+            let mut metadata = MetadataMap::new();
+            metadata.insert(
+                MetadataKey::from_str(&cfg.common.tracing_header_key).unwrap(),
+                MetadataValue::from_str(&cfg.common.tracing_header_value).unwrap(),
+            );
+            metadata.insert(
+                MetadataKey::from_str(&cfg.grpc.org_header_key).unwrap(),
+                MetadataValue::from_str(&cfg.common.tracing_grpc_header_org).unwrap(),
+            );
+            metadata.insert(
+                MetadataKey::from_str(&cfg.grpc.stream_header_key).unwrap(),
+                MetadataValue::from_str(&cfg.common.tracing_grpc_header_stream_name).unwrap(),
+            );
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(&cfg.common.otel_otlp_grpc_url)
+                .with_metadata(metadata)
+                .with_protocol(opentelemetry_otlp::Protocol::Grpc)
+        })
+    };
+    let tracer = tracer
+        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+            Resource::new(vec![
+                KeyValue::new("service.name", cfg.common.node_role.to_string()),
+                KeyValue::new("service.instance", cfg.common.instance_name.to_string()),
+                KeyValue::new("service.version", VERSION),
+            ]),
+        ))
         .install_batch(opentelemetry_sdk::runtime::Tokio)?;
 
     let layer = if cfg.log.json_format {
@@ -654,10 +869,29 @@ fn enable_tracing() -> Result<(), anyhow::Error> {
         tracing_subscriber::fmt::layer().with_ansi(false).boxed()
     };
 
+    global::set_tracer_provider(tracer.clone());
     Registry::default()
         .with(tracing_subscriber::EnvFilter::new(&cfg.log.level))
         .with(layer)
-        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(OpenTelemetryLayer::new(
+            tracer.tracer("tracing-otel-subscriber"),
+        ))
         .init();
+    Ok(())
+}
+
+/// Initializes enterprise features.
+#[cfg(feature = "enterprise")]
+async fn init_enterprise() -> Result<(), anyhow::Error> {
+    o2_enterprise::enterprise::search::init().await?;
+
+    if o2_enterprise::enterprise::common::infra::config::get_config()
+        .super_cluster
+        .enabled
+    {
+        log::info!("init super cluster");
+        o2_enterprise::enterprise::super_cluster::kv::init().await?;
+        openobserve::super_cluster_queue::init().await?;
+    }
     Ok(())
 }

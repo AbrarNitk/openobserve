@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -25,7 +25,11 @@ pub fn max(timestamp: i64, param: &Option<LabelModifier>, data: &Value) -> Resul
             data,
             "max",
             |prev, val| {
-                if prev >= val { prev } else { val }
+                if prev >= val {
+                    prev
+                } else {
+                    val
+                }
             },
         )?;
     if score_values.is_none() {

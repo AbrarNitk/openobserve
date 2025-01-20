@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -35,7 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       @filter="fieldsFilterFn"
       class="textbox col no-case"
       :loading="variableItem.isLoading"
-      data-test="dashboard-variable-query-value-selector"
+      data-test="dashboard-variable-custom-value-selector"
       :multiple="variableItem.multiSelect"
       popup-no-route-dismiss
       popup-content-style="z-index: 10001"
@@ -140,14 +140,33 @@ export default defineComponent({
       if (selectedValue.value) {
         if (Array.isArray(selectedValue.value)) {
           if (selectedValue.value.length > 2) {
-            const firstTwoValues = selectedValue.value.slice(0, 2).join(", ");
+            const firstTwoLabels = selectedValue.value
+              .slice(0, 2)
+              .map((val) => {
+                const option = props.variableItem?.options?.find(
+                  (opt: any) => opt.value === val
+                );
+                return option ? option.label : val;
+              })
+              .join(", ");
+
             const remainingCount = selectedValue.value.length - 2;
-            return `${firstTwoValues} ...+${remainingCount} more`;
+            return `${firstTwoLabels} ...+${remainingCount} more`;
           } else {
-            return selectedValue.value.join(", ");
+            return selectedValue.value
+              .map((val) => {
+                const option = props.variableItem?.options?.find(
+                  (opt: any) => opt.value === val
+                );
+                return option ? option.label : val;
+              })
+              .join(", ");
           }
         } else {
-          return selectedValue.value;
+          const option = props.variableItem?.options?.find(
+            (opt: any) => opt.value === selectedValue.value
+          );
+          return option ? option.label : selectedValue.value;
         }
       } else if (!props.variableItem.isLoading) {
         return "(No Options Available)";

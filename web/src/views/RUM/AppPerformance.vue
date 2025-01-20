@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -307,8 +307,10 @@ export default defineComponent({
     watch(selectedDate, (value) => {
       performanceState.data.datetime = value;
       currentTimeObj.value = {
-        start_time: new Date(selectedDate.value.startTime),
-        end_time: new Date(selectedDate.value.endTime),
+        __global: {
+          start_time: new Date(selectedDate.value.startTime),
+          end_time: new Date(selectedDate.value.endTime),
+        },
       };
     });
 

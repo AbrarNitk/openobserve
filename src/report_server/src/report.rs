@@ -19,7 +19,7 @@ use lettre::{
 use once_cell::sync::Lazy;
 use tokio::time::{sleep, Duration};
 
-use crate::models;
+use crate::models::{self, ReportType};
 
 static CHROME_LAUNCHER_OPTIONS: tokio::sync::OnceCell<BrowserConfig> =
     tokio::sync::OnceCell::const_new();
@@ -136,6 +136,7 @@ pub static SMTP_CLIENT: Lazy<AsyncSmtpTransport<Tokio1Executor>> = Lazy::new(|| 
     transport_builder.build()
 });
 
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_report(
     dashboard: &models::ReportDashboard,
     org_id: &str,
@@ -143,6 +144,8 @@ pub async fn generate_report(
     user_pass: &str,
     web_url: &str,
     timezone: &str,
+    report_type: ReportType,
+    report_name: &str,
 ) -> Result<(Vec<u8>, String), anyhow::Error> {
     let dashboard_id = &dashboard.dashboard;
     let folder_id = &dashboard.folder;
@@ -172,36 +175,56 @@ pub async fn generate_report(
         }
     });
 
-    log::debug!("Navigating to web url: {}", &web_url);
+    log::info!("Navigating to web url: {web_url}/login?login_as_internal_user=true");
     let page = browser
         .new_page(&format!("{web_url}/login?login_as_internal_user=true"))
         .await?;
     page.disable_log().await?;
-    log::debug!("headless: new page created");
+    log::info!("headless: new page created");
+    sleep(Duration::from_secs(5)).await;
 
-    page.find_element("input[type='email']")
-        .await?
-        .click()
-        .await?
-        .type_str(user_id)
-        .await?;
-    log::debug!("headless: email input filled");
+    match page.find_element("input[type='email']").await {
+        Ok(elem) => {
+            elem.click().await?.type_str(user_id).await?;
+        }
+        Err(e) => {
+            let page_url = page.url().await;
+            return Err(anyhow::anyhow!(
+                "Error finding email input box: current url: {:#?} error: {e}",
+                page_url
+            ));
+        }
+    }
+    log::info!("headless: email input filled");
 
-    page.find_element("input[type='password']")
-        .await?
-        .click()
-        .await?
-        .type_str(user_pass)
-        .await?
-        .press_key("Enter")
-        .await?;
-    log::debug!("headless: password input filled");
+    match page.find_element("input[type='password']").await {
+        Ok(elem) => {
+            elem.click()
+                .await?
+                .type_str(user_pass)
+                .await?
+                .press_key("Enter")
+                .await?;
+        }
+        Err(e) => {
+            let page_url = page.url().await;
+            return Err(anyhow::anyhow!(
+                "Error finding password input box: current url: {:#?} error: {e}",
+                page_url
+            ));
+        }
+    }
+    log::info!("headless: password input filled");
 
     // Does not seem to work for single page client application
     page.wait_for_navigation().await?;
     sleep(Duration::from_secs(5)).await;
 
     let timerange = &dashboard.timerange;
+    let search_type_params = match report_type.clone() {
+        ReportType::Cache => "search_type=ui".to_string(),
+        _ => format!("search_type=reports&report_id={org_id}-{report_name}"),
+    };
 
     // dashboard link in the email should contain data of the same period as the report
     let (dashb_url, email_dashb_url) = match timerange.range_type {
@@ -209,7 +232,7 @@ pub async fn generate_report(
             let period = &timerange.period;
             let (time_duration, time_unit) = period.split_at(period.len() - 1);
             let dashb_url = format!(
-                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&searchtype=reports&period={period}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
+                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&{search_type_params}&period={period}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
             );
             log::debug!("dashb_url for dashboard {folder_id}/{dashboard_id}: {dashb_url}");
 
@@ -260,7 +283,7 @@ pub async fn generate_report(
         }
         models::ReportTimerangeType::Absolute => {
             let url = format!(
-                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&searchtype=reports&from={}&to={}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
+                "{web_url}/dashboards/view?org_identifier={org_id}&dashboard={dashboard_id}&folder={folder_id}&tab={tab_id}&refresh=Off&{search_type_params}&from={}&to={}&timezone={timezone}&var-Dynamic+filters=%255B%255D&print=true{dashb_vars}",
                 &timerange.from, &timerange.to
             );
             log::debug!("dashb_url for dashboard {folder_id}/{dashboard_id}: {url}");
@@ -269,78 +292,106 @@ pub async fn generate_report(
         }
     };
 
-    log::debug!("headless: going to dash url");
+    log::info!("headless: navigating to organization: {web_url}/?org_identifier={org_id}");
     // First navigate to the correct org
     page.goto(&format!("{web_url}/?org_identifier={org_id}"))
         .await?;
     page.wait_for_navigation().await?;
     sleep(Duration::from_secs(2)).await;
-    log::debug!("headless: navigated to the org_id: {org_id}");
 
-    page.goto(&dashb_url).await?;
-    log::debug!("headless: going to dash url");
+    log::info!("headless: navigated to the organization {org_id}");
+    log::info!("headless: navigating to dashboard url {dashb_url}");
+
+    if let Err(e) = page.goto(&dashb_url).await {
+        let page_url = page.url().await;
+        log::error!(
+            "Error navigating to dashboard url {dashb_url}: current uri: {:#?} error: {e}",
+            page_url
+        );
+        return Err(anyhow::anyhow!("{e}"));
+    }
 
     // Wait for navigation does not really wait until it is fully loaded
     page.wait_for_navigation().await?;
 
-    log::debug!("waiting for data to load for dashboard {dashboard_id}");
+    log::info!("waiting for data to load for dashboard {dashboard_id}");
 
     // If the span element is not rendered yet, capture whatever is loaded till now
-    if let Err(e) = wait_for_panel_data_load(&page).await {
-        log::error!(
-            "[REPORT] error occurred while finding the span element for dashboard {dashboard_id}:{e}"
-        );
-    } else {
-        log::info!("[REPORT] all panel data loaded for report dashboard: {dashboard_id}");
+    match wait_for_panel_data_load(&page).await {
+        Err(e) => {
+            log::error!(
+                "[REPORT] error finding the span element for dashboard {dashboard_id}: {e}"
+            );
+            log::info!("[REPORT] proceeding with whatever data is loaded until now");
+        }
+        Ok(dur) => {
+            log::info!(
+                "[REPORT] all panel data loaded for report dashboard: {dashboard_id} in {} seconds",
+                dur.as_secs_f64()
+            );
+        }
     }
 
     if let Err(e) = page.find_element("main").await {
+        let page_url = page.url().await;
         browser.close().await?;
+        browser.wait().await?;
         handle.await?;
         return Err(anyhow::anyhow!(
-            "[REPORT] main element not rendered yet for dashboard {dashboard_id}: {e}"
+            "[REPORT] main html element not rendered yet for dashboard {dashboard_id}; most likely login failed: current url: {:#?} error: {e}",
+            page_url
         ));
     }
     if let Err(e) = page.find_element("div.displayDiv").await {
+        let page_url = page.url().await;
         browser.close().await?;
+        browser.wait().await?;
         handle.await?;
         return Err(anyhow::anyhow!(
-            "[REPORT] div.displayDiv element not rendered yet for dashboard {dashboard_id}: {e}"
+            "[REPORT] div.displayDiv element not rendered yet for dashboard {dashboard_id}: current url: {:#?} error: {e}",
+            page_url
         ));
     }
 
     // Last two elements loaded means atleast the metric components have loaded.
     // Convert the page into pdf
-    let pdf_data = page
-        .pdf(PrintToPdfParams {
-            landscape: Some(true),
-            ..Default::default()
-        })
-        .await?;
+    let pdf_data = match report_type {
+        ReportType::PDF => {
+            page.pdf(PrintToPdfParams {
+                landscape: Some(true),
+                ..Default::default()
+            })
+            .await?
+        }
+        // No need to capture pdf when report type is cache
+        ReportType::Cache => vec![],
+    };
 
     browser.close().await?;
+    browser.wait().await?;
     handle.await?;
     log::debug!("done with headless browser");
+
     Ok((pdf_data, email_dashb_url))
 }
 
-/// Sends emails to the [`Report`] recepients. Currently only one pdf data is supported.
+/// Sends emails to the [`Report`] recipients. Currently only one pdf data is supported.
 pub async fn send_email(
     pdf_data: &[u8],
     email_details: models::EmailDetails,
     config: models::SmtpConfig,
 ) -> Result<(), anyhow::Error> {
-    let mut recepients = vec![];
-    for recepient in &email_details.recepients {
-        recepients.push(recepient);
+    let mut recipients = vec![];
+    for recipient in &email_details.recipients {
+        recipients.push(recipient);
     }
 
     let mut email = Message::builder()
         .from(config.from_email.parse()?)
-        .subject(format!("Openobserve Report - {}", &email_details.title));
+        .subject(email_details.title.to_string());
 
-    for recepient in recepients {
-        email = email.to(recepient.parse()?);
+    for recipient in recipients {
+        email = email.to(recipient.parse()?);
     }
 
     if !config.reply_to.is_empty() {
@@ -350,15 +401,14 @@ pub async fn send_email(
     let email = email
         .multipart(
             MultiPart::mixed()
-                .singlepart(SinglePart::html(email_details.message))
                 .singlepart(SinglePart::html(format!(
-                    "<p><a href='{}' target='_blank'>Link to dashboard</a></p>",
-                    email_details.dashb_url
+                    "{}\n\n<p><a href='{}' target='_blank'>Link to dashboard</a></p>",
+                    email_details.message, email_details.dashb_url
                 )))
                 .singlepart(
                     // Only supports PDF for now, attach the PDF
                     lettre::message::Attachment::new(
-                        email_details.title, // Attachment filename
+                        format!("{}.pdf", sanitize_filename(&email_details.title)), // Attachment filename
                     )
                     .body(pdf_data.to_owned(), ContentType::parse("application/pdf")?),
                 ),
@@ -378,7 +428,7 @@ pub async fn send_email(
     }
 }
 
-pub async fn wait_for_panel_data_load(page: &Page) -> Result<(), anyhow::Error> {
+pub async fn wait_for_panel_data_load(page: &Page) -> Result<Duration, anyhow::Error> {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(get_config().chrome.chrome_sleep_secs.into());
     loop {
@@ -387,15 +437,29 @@ pub async fn wait_for_panel_data_load(page: &Page) -> Result<(), anyhow::Error> 
             .await
             .is_ok()
         {
-            return Ok(());
+            return Ok(start.elapsed());
         }
 
         if start.elapsed() >= timeout {
             return Err(anyhow::anyhow!(
-                "span element indicator for data load not rendered yet"
+                "Dashboard data not completely loaded yet in {} seconds",
+                start.elapsed().as_secs_f64()
             ));
         }
 
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

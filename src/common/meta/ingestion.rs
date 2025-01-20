@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -126,6 +126,11 @@ pub struct BulkResponseItem {
     #[serde(rename = "originalRecord")]
     #[schema(value_type = Object)]
     pub original_record: Option<json::Value>,
+}
+
+pub enum IngestionStatus {
+    Record(RecordStatus),
+    Bulk(BulkResponse),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -316,8 +321,10 @@ pub struct GCPIngestionResponse {
 pub enum IngestionRequest<'a> {
     JSON(&'a web::Bytes),
     Multi(&'a web::Bytes),
-    KinesisFH(&'a KinesisFHRequest),
     GCP(&'a GCPIngestionRequest),
+    KinesisFH(&'a KinesisFHRequest),
+    RUM(&'a web::Bytes),
+    Usage(&'a web::Bytes),
 }
 
 pub enum IngestionData<'a> {

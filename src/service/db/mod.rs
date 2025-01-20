@@ -1,4 +1,4 @@
-// Copyright 2024 Zinc Labs Inc.
+// Copyright 2024 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -17,24 +17,31 @@ use bytes::Bytes;
 use hashbrown::HashMap;
 use infra::{db as infra_db, errors::Result};
 #[cfg(feature = "enterprise")]
-use {infra::errors::Error, o2_enterprise::enterprise::common::infra::config::O2_CONFIG};
+use {
+    infra::errors::Error,
+    o2_enterprise::enterprise::common::infra::config::get_config as get_o2_config,
+};
 
 pub mod alerts;
 pub mod compact;
 pub mod dashboards;
+pub mod distinct_values;
 pub mod enrichment_table;
 pub mod file_list;
 pub mod functions;
 pub mod instance;
 pub mod kv;
 pub mod metrics;
+#[cfg(feature = "enterprise")]
 pub mod ofga;
 pub mod organization;
-pub mod pipelines;
+pub mod pipeline;
 pub mod saved_view;
 pub mod scheduler;
 pub mod schema;
+pub mod search_job;
 pub mod session;
+pub mod short_url;
 pub mod syslog;
 pub mod user;
 pub mod version;
@@ -59,7 +66,7 @@ pub(crate) async fn put(
 
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         o2_enterprise::enterprise::super_cluster::queue::put(key, value, need_watch, start_dt)
             .await
             .map_err(|e| Error::Message(e.to_string()))?;
@@ -77,7 +84,7 @@ pub(crate) async fn delete(
 ) -> Result<()> {
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         o2_enterprise::enterprise::super_cluster::queue::delete(
             key,
             with_prefix,
@@ -97,7 +104,7 @@ pub(crate) async fn delete(
 pub(crate) async fn delete_if_exists(key: &str, with_prefix: bool, need_watch: bool) -> Result<()> {
     // super cluster
     #[cfg(feature = "enterprise")]
-    if O2_CONFIG.super_cluster.enabled {
+    if get_o2_config().super_cluster.enabled {
         o2_enterprise::enterprise::super_cluster::queue::delete(key, with_prefix, need_watch, None)
             .await
             .map_err(|e| Error::Message(e.to_string()))?;

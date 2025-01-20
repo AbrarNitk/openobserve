@@ -1,4 +1,4 @@
-<!-- Copyright 2023 Zinc Labs Inc.
+<!-- Copyright 2023 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -19,7 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     class="q-pt-md"
     :class="store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'"
   >
-    <div class="row items-center no-wrap q-px-md">
+    <div class="add-stream-header row items-center no-wrap q-px-md">
       <div class="col">
         <div class="text-body1 text-bold" data-test="add-stream-title">
           {{ t("logStream.add") }}
@@ -58,7 +58,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <div data-test="add-stream-type-input">
           <q-select
             v-model="streamInputs.stream_type"
-            :options="streamTypes"
+            :options="filteredStreamTypes"
             :label="t('alerts.streamType') + ' *'"
             :popup-content-style="{ textTransform: 'capitalize' }"
             color="input-border"
@@ -140,11 +140,16 @@ const streamTypes = [
   { label: "Logs", value: "logs" },
   { label: "Metrics", value: "metrics" },
   { label: "Traces", value: "traces" },
+  { label: "Enrichment_Tables", value: "enrichment_tables" },
 ];
 
-const emits = defineEmits(["streamAdded", "close"]);
+const emits = defineEmits(["streamAdded", "close","added:stream-aded"]);
+const props = defineProps<{
+  isInPipeline: boolean;
+}>();
 
-const { addStream, getStream } = useStreams();
+
+const { addStream, getStream, getUpdatedSettings } = useStreams();
 
 const fields: Ref<any[]> = ref([]);
 
@@ -167,9 +172,17 @@ const getDefaultField = () => {
   };
 };
 
+
 const isSchemaEvolutionEnabled = computed(() => {
   return store.state.zoConfig.user_defined_schemas_enabled;
 });
+
+const filteredStreamTypes = computed(() => {
+  //here we can filter out based on isInPipeline prop
+  //but for testing purpose we are returning all streamTypes
+  return streamTypes;
+});
+
 
 const showDataRetention = computed(
   () =>
@@ -199,7 +212,7 @@ const saveStream = async () => {
 
   const payload = getStreamPayload();
   streamService
-    .updateSettings(
+    .createSettings(
       store.state.selectedOrganization.identifier,
       streamInputs.value.name,
       streamInputs.value.stream_type,
@@ -225,23 +238,29 @@ const saveStream = async () => {
         });
     })
     .catch((err) => {
-      q.notify({
+      if(err.response.status != 403){
+        q.notify({
         color: "negative",
         message: err.response?.data?.message || "Failed to create stream",
         timeout: 4000,
       });
+      }
     });
+
+    emits("added:stream-aded", streamInputs.value);
 };
 
 const getStreamPayload = () => {
   let settings: {
     partition_keys: any[];
+    index_fields: any[];
     full_text_search_keys: any[];
     bloom_filter_fields: any[];
     data_retention?: number;
     defined_schema_fields: any[];
   } = {
     partition_keys: [],
+    index_fields: [],
     full_text_search_keys: [],
     bloom_filter_fields: [],
     defined_schema_fields: [],
@@ -273,10 +292,20 @@ const getStreamPayload = () => {
         settings.full_text_search_keys.push(field.name);
       }
 
+      if (index === "secondaryIndexKey") {
+        settings.index_fields.push(field.name);
+      }
+
       if (index === "keyPartition") {
         settings.partition_keys.push({
           field: field.name,
           types: "value",
+        });
+      }
+      if (index === "prefixPartition") {
+        settings.partition_keys.push({
+          field: field.name,
+          types: "prefix",
         });
       }
 
